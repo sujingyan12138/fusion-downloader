@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+下载结果/
+抖音浏览器登录态/
+小红书浏览器登录态/
+
