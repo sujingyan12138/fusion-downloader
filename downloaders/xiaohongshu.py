@@ -17,6 +17,7 @@ from typing import Callable, Iterable
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
 from . import douyin
@@ -55,13 +56,14 @@ class DownloadEngine:
     idm_path: Path | None = None
     proxy: "HeaderProxyServer | None" = None
     idm_threshold_bytes: int = douyin.IDM_LARGE_FILE_THRESHOLD
+    idm_video_threshold_bytes: int = douyin.IDM_VIDEO_FILE_THRESHOLD
 
     @property
     def name(self) -> str:
         if self.mode == "idm" and self.idm_path:
             return f"IDM ({self.idm_path})"
         if self.mode == "smart" and self.idm_path:
-            return f"智能模式（>{douyin.format_bytes(self.idm_threshold_bytes)} 用 IDM）"
+            return f"智能模式（视频>{douyin.format_bytes(self.idm_video_threshold_bytes)}或大小未知用 IDM）"
         return "内置下载器"
 
     def should_use_idm(self, size: int) -> bool:
@@ -71,6 +73,15 @@ class DownloadEngine:
             return True
         if self.mode == "smart":
             return size >= self.idm_threshold_bytes
+        return False
+
+    def should_use_idm_for_video(self, size: int) -> bool:
+        if not self.idm_path or not self.proxy:
+            return False
+        if self.mode == "idm":
+            return True
+        if self.mode == "smart":
+            return size == 0 or size >= self.idm_video_threshold_bytes
         return False
 
 
@@ -228,7 +239,16 @@ def download_note(
         "live_photos": [],
         "videos": [],
         "failures": [],
+        "skipped": [],
     }
+    existing_media_names = existing_media_filenames(note_dir)
+    if has_existing_note_download(note_dir, note_id, existing_media_names):
+        logger(f"已存在下载结果，跳过下载：{note_id}")
+        report["skipped"].append({"note_id": note_id, "reason": "exists"})
+        report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        report["elapsed_seconds"] = 0
+        return report
+
     engine = make_download_engine(use_idm)
     report["download_engine"] = engine.name
     logger(f"下载引擎：{engine.name}")
@@ -410,7 +430,7 @@ def download_favorite_videos(
         limit = None
 
     logger("收藏作品：全部收藏作品")
-    snapshot = read_favorite_video_snapshot(None, logger)
+    snapshot = read_favorite_video_snapshot(limit, logger)
     if snapshot.get("loginRequired"):
         raise XhsDownloadError("当前小红书登录态不可用。请先点击“登录小红书”，扫码登录后再下载收藏作品。")
     notes = snapshot.get("notes") if isinstance(snapshot.get("notes"), list) else []
@@ -431,25 +451,16 @@ def download_favorite_videos(
         "skipped": [],
     }
 
-    existing_media_names = existing_media_filenames(collection_dir)
-    for index, url in enumerate(urls, start=1):
-        note_id = extract_note_id_from_url(url)
-        logger(f"\n----- 小红书收藏作品 {index}/{len(urls)} -----")
-        logger(url)
-        if note_id and has_existing_note_download(collection_dir, note_id, existing_media_names):
-            logger(f"已存在，跳过：{note_id}")
-            report["skipped"].append({"index": index, "note_id": note_id, "url": url, "reason": "exists"})
-            continue
-        try:
-            item_report = download_note(url, collection_dir, log=logger, max_workers=max_workers, use_idm=use_idm)
-            report["items"].append({"index": index, "url": url, "status": "ok", "report": item_report})
-            if limit and len(report["items"]) >= limit:
-                logger(f"已达到收藏作品上限 {limit}，停止。")
-                break
-        except Exception as exc:  # noqa: BLE001 - keep collection processing going.
-            message = str(exc)
-            logger(f"收藏作品失败：{message}")
-            report["failures"].append({"index": index, "note_id": note_id, "url": url, "error": message})
+    download_xhs_url_collection_items(
+        urls,
+        "小红书收藏作品",
+        collection_dir,
+        report,
+        logger,
+        max_workers=max_workers,
+        use_idm=use_idm,
+        limit=limit,
+    )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     report["ok_count"] = len(report["items"])
@@ -497,25 +508,16 @@ def download_xhs_collection_notes(
         "skipped": [],
     }
 
-    existing_media_names = existing_media_filenames(collection_dir)
-    for index, url in enumerate(urls, start=1):
-        note_id = extract_note_id_from_url(url)
-        logger(f"\n----- 小红书专辑作品 {index}/{len(urls)} -----")
-        logger(url)
-        if note_id and has_existing_note_download(collection_dir, note_id, existing_media_names):
-            logger(f"已存在，跳过：{note_id}")
-            report["skipped"].append({"index": index, "note_id": note_id, "url": url, "reason": "exists"})
-            continue
-        try:
-            item_report = download_note(url, collection_dir, log=logger, max_workers=max_workers, use_idm=use_idm)
-            report["items"].append({"index": index, "url": url, "status": "ok", "report": item_report})
-            if limit and len(report["items"]) >= limit:
-                logger(f"已达到专辑作品上限 {limit}，停止。")
-                break
-        except Exception as exc:  # noqa: BLE001 - keep collection processing going.
-            message = str(exc)
-            logger(f"专辑作品失败：{message}")
-            report["failures"].append({"index": index, "note_id": note_id, "url": url, "error": message})
+    download_xhs_url_collection_items(
+        urls,
+        "小红书专辑作品",
+        collection_dir,
+        report,
+        logger,
+        max_workers=max_workers,
+        use_idm=use_idm,
+        limit=limit,
+    )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     report["ok_count"] = len(report["items"])
@@ -527,9 +529,79 @@ def download_xhs_collection_notes(
     return report
 
 
+def download_xhs_url_collection_items(
+    urls: list[str],
+    label: str,
+    collection_dir: Path,
+    report: dict,
+    logger: LogFn,
+    max_workers: int,
+    use_idm: bool | str,
+    limit: int | None,
+) -> None:
+    existing_media_names = existing_media_filenames(collection_dir)
+    pending: list[tuple[int, str, str]] = []
+    for index, url in enumerate(urls, start=1):
+        note_id = extract_note_id_from_url(url)
+        if note_id and has_existing_note_download(collection_dir, note_id, existing_media_names):
+            logger(f"已存在，跳过{label} {index}/{len(urls)}：{note_id}")
+            report["skipped"].append({"index": index, "note_id": note_id, "url": url, "reason": "exists"})
+            continue
+        pending.append((index, note_id, url))
+
+    if limit:
+        pending = pending[:limit]
+
+    collection_workers, per_item_workers = split_collection_workers(len(pending), max_workers)
+    if len(pending) > 1:
+        logger(f"{label}并发：作品 {collection_workers}，单作品媒体 {per_item_workers}")
+
+    def run_one(item: tuple[int, str, str]) -> dict:
+        index, note_id, url = item
+        logger(f"\n----- {label} {index}/{len(urls)} -----")
+        logger(url)
+        try:
+            item_report = download_note(url, collection_dir, log=logger, max_workers=per_item_workers, use_idm=use_idm)
+            return {"kind": "item", "item": {"index": index, "note_id": note_id, "url": url, "status": "ok", "report": item_report}}
+        except Exception as exc:  # noqa: BLE001 - keep collection processing going.
+            message = str(exc)
+            logger(f"{label}失败：{message}")
+            return {"kind": "failure", "item": {"index": index, "note_id": note_id, "url": url, "error": message}}
+
+    if not pending:
+        return
+    if collection_workers == 1:
+        results = [run_one(item) for item in pending]
+    else:
+        results = []
+        with ThreadPoolExecutor(max_workers=collection_workers) as executor:
+            futures = [executor.submit(run_one, item) for item in pending]
+            for future in as_completed(futures):
+                results.append(future.result())
+
+    for result in sorted(results, key=lambda item: item.get("item", {}).get("index", 0)):
+        if result.get("kind") == "item":
+            report["items"].append(result["item"])
+        else:
+            report["failures"].append(result["item"])
+
+
+def split_collection_workers(total_items: int, max_workers: int) -> tuple[int, int]:
+    if total_items <= 1:
+        return 1, max(1, max_workers)
+    if max_workers <= 2:
+        return 1, max(1, max_workers)
+    collection_workers = min(total_items, 3 if max_workers >= 8 else 2)
+    per_item_workers = 3 if max_workers >= 8 else 2
+    return collection_workers, per_item_workers
+
+
 def make_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
+    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     return session
 
 
@@ -1089,12 +1161,18 @@ def save_or_enqueue_media(
     result: MediaProbeResult,
     target: Path,
     referer: str,
+    declared_dimensions: str = "",
 ) -> tuple[int, str]:
     size = result.content_length or result.candidate.declared_size
-    if engine.should_use_idm(size):
+    if engine.should_use_idm_for_video(size):
         enqueue_idm(engine, result.candidate.url, target, referer)
-        return size, ""
-    return download_media(session, result.candidate.url, target, referer)
+        return size, declared_dimensions
+    return download_media(session, result.candidate.url, target, referer, declared_dimensions)
+
+
+def media_will_use_idm(engine: DownloadEngine, result: MediaProbeResult) -> bool:
+    size = result.content_length or result.candidate.declared_size
+    return engine.should_use_idm_for_video(size)
 
 
 def enqueue_idm(engine: DownloadEngine, url: str, target: Path, referer: str) -> None:
@@ -1240,18 +1318,20 @@ def download_media_task(
             result = choose_best_media(session, image.stream, final_url, f"live_photo_{image.index:03d}")
             prefix = f"{file_prefix}_" if file_prefix else ""
             target = unique_path(note_dir / f"{prefix}{image.index:03d}_live.mp4")
-            bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url)
+            declared_dimensions = candidate_dimensions(result.candidate)
+            used_idm = media_will_use_idm(engine, result)
+            bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url, declared_dimensions)
             item = {
                 "index": image.index,
                 "status": "ok",
                 "file": str(target),
                 "bytes": bytes_count,
                 "dimensions": dimensions,
-                "declared_dimensions": candidate_dimensions(result.candidate),
+                "declared_dimensions": declared_dimensions,
                 "source": result.candidate.source,
                 "codec": result.candidate.codec,
                 "url": result.candidate.url,
-                "engine": engine.mode,
+                "engine": "idm" if used_idm else engine.mode,
                 "elapsed_seconds": round(time.perf_counter() - start, 3),
             }
             return {"kind": kind, "item": item}
@@ -1259,18 +1339,20 @@ def download_media_task(
         result = choose_best_media(session, payload, final_url, f"video_{index:03d}")
         prefix = f"{file_prefix}_" if file_prefix else ""
         target = unique_path(note_dir / f"{prefix}video_{index:03d}.mp4")
-        bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url)
+        declared_dimensions = candidate_dimensions(result.candidate)
+        used_idm = media_will_use_idm(engine, result)
+        bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url, declared_dimensions)
         item = {
             "index": index,
             "status": "ok",
             "file": str(target),
             "bytes": bytes_count,
             "dimensions": dimensions,
-            "declared_dimensions": candidate_dimensions(result.candidate),
+            "declared_dimensions": declared_dimensions,
             "source": result.candidate.source,
             "codec": result.candidate.codec,
             "url": result.candidate.url,
-            "engine": engine.mode,
+            "engine": "idm" if used_idm else engine.mode,
             "elapsed_seconds": round(time.perf_counter() - start, 3),
         }
         return {"kind": kind, "item": item}
@@ -2128,6 +2210,7 @@ def download_media(
     url: str,
     target: Path,
     referer: str,
+    declared_dimensions: str = "",
 ) -> tuple[int, str]:
     headers = dict(BASE_HEADERS)
     headers["Referer"] = referer or "https://www.xiaohongshu.com/"
@@ -2154,7 +2237,7 @@ def download_media(
     if bytes_count < 32:
         raise XhsDownloadError("视频响应内容过短。")
 
-    return bytes_count, probe_video_dimensions(target)
+    return bytes_count, declared_dimensions or probe_video_dimensions(target)
 
 
 def probe_video_dimensions(path: Path) -> str:

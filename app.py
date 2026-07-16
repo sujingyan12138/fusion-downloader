@@ -29,7 +29,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.title("融合下载器")
         self.geometry("1120x780")
         self.minsize(980, 700)
-        self.configure(bg="#f5f5f7")
+        self.configure(bg="#f6f8fb")
 
         self.log_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.worker: threading.Thread | None = None
@@ -48,13 +48,23 @@ class UnifiedDownloaderApp(tk.Tk):
         self.collection_var = tk.StringVar(value="")
         self.engine_var = tk.StringVar(value="smart")
         self.speed_var = tk.StringVar(value="balanced")
+        self.run_mode_var = tk.StringVar(value="单个")
+        self.mode_manually_selected = False
+        self.advanced_visible = tk.BooleanVar(value=False)
+        self.log_visible = tk.BooleanVar(value=False)
         self.login_douyin_button: ttk.Button | None = None
         self.login_xhs_button: ttk.Button | None = None
         self.check_login_button: ttk.Button | None = None
         self.open_output_button: ttk.Button | None = None
+        self.paste_button: ttk.Button | None = None
+        self.clear_button: ttk.Button | None = None
+        self.copy_failure_button: ttk.Button | None = None
+        self.copy_all_button: ttk.Button | None = None
+        self.clear_log_button: ttk.Button | None = None
 
         self._setup_style()
         self._build_ui()
+        self._bind_shortcuts()
         self._on_platform_change()
         self.after(100, self._drain_log_queue)
 
@@ -62,141 +72,200 @@ class UnifiedDownloaderApp(tk.Tk):
         style = ttk.Style(self)
         style.theme_use("clam")
         base_font = ("Microsoft YaHei UI", 10)
-        title_font = ("Microsoft YaHei UI", 24, "bold")
+        title_font = ("Microsoft YaHei UI", 28, "bold")
         style.configure(".", font=base_font)
-        style.configure("Root.TFrame", background="#f5f5f7")
+        style.configure("Root.TFrame", background="#f6f8fb")
+        style.configure("Topbar.TFrame", background="#f6f8fb")
         style.configure("Panel.TFrame", background="#ffffff", relief="solid", borderwidth=1)
         style.configure("PanelInner.TFrame", background="#ffffff", relief="flat")
-        style.configure("StatCard.TFrame", background="#f9fafb", relief="solid", borderwidth=1)
-        style.configure("Title.TLabel", background="#f5f5f7", foreground="#1d1d1f", font=title_font)
-        style.configure("Subtitle.TLabel", background="#f5f5f7", foreground="#6e6e73", font=("Microsoft YaHei UI", 10))
-        style.configure("PanelTitle.TLabel", background="#ffffff", foreground="#1d1d1f", font=("Microsoft YaHei UI", 11, "bold"))
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#6e6e73", font=("Microsoft YaHei UI", 9))
-        style.configure("Hint.TLabel", background="#ffffff", foreground="#8a8a8e", font=("Microsoft YaHei UI", 9))
-        style.configure("StatValue.TLabel", background="#f9fafb", foreground="#1d1d1f", font=("Microsoft YaHei UI", 20, "bold"))
-        style.configure("SuccessStatValue.TLabel", background="#f9fafb", foreground="#248a3d", font=("Microsoft YaHei UI", 20, "bold"))
-        style.configure("DangerStatValue.TLabel", background="#f9fafb", foreground="#d70015", font=("Microsoft YaHei UI", 20, "bold"))
-        style.configure("StatLabel.TLabel", background="#f9fafb", foreground="#6e6e73", font=("Microsoft YaHei UI", 9))
-        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 10, "bold"), padding=(18, 10), borderwidth=0)
+        style.configure("Advanced.TFrame", background="#f8fafd", relief="solid", borderwidth=1)
+        style.configure("StatCard.TFrame", background="#f8fafd", relief="solid", borderwidth=1)
+        style.configure("Title.TLabel", background="#f6f8fb", foreground="#172033", font=title_font)
+        style.configure("Subtitle.TLabel", background="#f6f8fb", foreground="#6e7788", font=("Microsoft YaHei UI", 10))
+        style.configure("PanelTitle.TLabel", background="#ffffff", foreground="#172033", font=("Microsoft YaHei UI", 12, "bold"))
+        style.configure("SectionTitle.TLabel", background="#ffffff", foreground="#172033", font=("Microsoft YaHei UI", 15, "bold"))
+        style.configure("Muted.TLabel", background="#ffffff", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
+        style.configure("Hint.TLabel", background="#ffffff", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
+        style.configure("AdvancedMuted.TLabel", background="#f8fafd", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
+        style.configure("AdvancedHint.TLabel", background="#f8fafd", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
+        style.configure("Status.TLabel", background="#ffffff", foreground="#303848", font=("Microsoft YaHei UI", 10))
+        style.configure("Success.TLabel", background="#ffffff", foreground="#0e9f8a", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("Danger.TLabel", background="#ffffff", foreground="#d64545", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("StatValue.TLabel", background="#f8fafd", foreground="#172033", font=("Microsoft YaHei UI", 18, "bold"))
+        style.configure("SuccessStatValue.TLabel", background="#f8fafd", foreground="#0e9f8a", font=("Microsoft YaHei UI", 18, "bold"))
+        style.configure("DangerStatValue.TLabel", background="#f8fafd", foreground="#d64545", font=("Microsoft YaHei UI", 18, "bold"))
+        style.configure("StatLabel.TLabel", background="#f8fafd", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
+        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 11, "bold"), padding=(22, 11), borderwidth=0)
         style.map(
             "Primary.TButton",
-            background=[("disabled", "#c7c7cc"), ("active", "#0066cc"), ("!disabled", "#0071e3")],
+            background=[("disabled", "#c8d1e0"), ("active", "#1f4fd1"), ("!disabled", "#2f6bff")],
             foreground=[("disabled", "#ffffff"), ("!disabled", "#ffffff")],
         )
         style.configure("Secondary.TButton", font=("Microsoft YaHei UI", 10), padding=(13, 9), borderwidth=1)
         style.map(
             "Secondary.TButton",
-            background=[("disabled", "#f2f2f7"), ("active", "#e8f2ff"), ("!disabled", "#ffffff")],
-            foreground=[("disabled", "#a1a1a6"), ("!disabled", "#1d1d1f")],
+            background=[("disabled", "#f2f5f9"), ("active", "#eef4ff"), ("!disabled", "#ffffff")],
+            foreground=[("disabled", "#a2adbd"), ("!disabled", "#303848")],
         )
-        style.configure("TCombobox", padding=(8, 6), fieldbackground="#ffffff", background="#ffffff", foreground="#1d1d1f", bordercolor="#d2d2d7", arrowcolor="#6e6e73")
-        style.map("TCombobox", fieldbackground=[("readonly", "#ffffff")], bordercolor=[("focus", "#0071e3")])
-        style.configure("TEntry", padding=(8, 7), fieldbackground="#ffffff", foreground="#1d1d1f", bordercolor="#d2d2d7")
-        style.map("TEntry", bordercolor=[("focus", "#0071e3")])
-        style.configure("Horizontal.TProgressbar", troughcolor="#e5e5ea", background="#0071e3", bordercolor="#e5e5ea", lightcolor="#0071e3", darkcolor="#0071e3")
+        style.configure("TCombobox", padding=(10, 7), fieldbackground="#ffffff", background="#ffffff", foreground="#172033", bordercolor="#d8dee8", arrowcolor="#6e7788")
+        style.map("TCombobox", fieldbackground=[("readonly", "#ffffff")], bordercolor=[("focus", "#2f6bff")])
+        style.configure("TEntry", padding=(10, 8), fieldbackground="#ffffff", foreground="#172033", bordercolor="#d8dee8")
+        style.map("TEntry", bordercolor=[("focus", "#2f6bff")])
+        style.configure("TRadiobutton", background="#ffffff", foreground="#303848", font=("Microsoft YaHei UI", 10))
+        style.map("TRadiobutton", foreground=[("disabled", "#a2adbd"), ("!disabled", "#303848")])
+        style.configure("Horizontal.TProgressbar", troughcolor="#e7edf5", background="#2f6bff", bordercolor="#e7edf5", lightcolor="#2f6bff", darkcolor="#2f6bff")
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        header = ttk.Frame(self, style="Root.TFrame", padding=(28, 22, 28, 12))
+        self.scroll_canvas = tk.Canvas(self, bg="#f6f8fb", highlightthickness=0, borderwidth=0)
+        self.page_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.scroll_canvas.yview)
+        self.scroll_canvas.configure(yscrollcommand=self.page_scrollbar.set)
+        self.scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        self.page_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        page = ttk.Frame(self.scroll_canvas, style="Root.TFrame")
+        self.page_frame = page
+        self.page_window = self.scroll_canvas.create_window((0, 0), window=page, anchor="nw")
+        page.bind("<Configure>", self._on_page_configure)
+        self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        page.columnconfigure(0, weight=1)
+
+        header = ttk.Frame(page, style="Topbar.TFrame", padding=(28, 20, 28, 12))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
+        header.columnconfigure(1, weight=0)
         ttk.Label(header, text="融合下载器", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="抖音与小红书作品、评论图片、收藏夹与专辑下载。", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(header, text="选择来源，粘贴内容，开始下载。抖音与小红书作品、评论图片、收藏夹与专辑统一处理。", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.open_output_button = ttk.Button(header, text="打开输出文件夹", style="Secondary.TButton", command=self.open_output_dir)
+        self.open_output_button.grid(row=0, column=1, rowspan=2, sticky="e")
 
-        input_panel = ttk.Frame(self, style="Panel.TFrame", padding=(22, 18, 22, 18))
-        input_panel.grid(row=1, column=0, sticky="ew", padx=28, pady=(4, 16))
+        input_panel = ttk.Frame(page, style="Panel.TFrame", padding=(24, 20, 24, 20))
+        input_panel.grid(row=1, column=0, sticky="ew", padx=28, pady=(4, 14))
         input_panel.columnconfigure(0, weight=1)
 
+        ttk.Label(input_panel, text="任务设置", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
         selectors = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        selectors.grid(row=0, column=0, sticky="ew")
-        selectors.columnconfigure(8, weight=1)
+        selectors.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        for column in (1, 3, 5):
+            selectors.columnconfigure(column, weight=1)
         ttk.Label(selectors, text="平台", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
         self.platform_combo = ttk.Combobox(selectors, textvariable=self.platform_var, state="readonly", values=("抖音", "小红书"), width=12)
-        self.platform_combo.grid(row=0, column=1, padx=(8, 18), sticky="w")
+        self.platform_combo.grid(row=0, column=1, padx=(8, 18), sticky="ew")
         self.platform_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_platform_change())
 
         ttk.Label(selectors, text="功能", style="Muted.TLabel").grid(row=0, column=2, sticky="w")
         self.feature_combo = ttk.Combobox(selectors, textvariable=self.feature_var, state="readonly", values=DOUYIN_FEATURES, width=20)
-        self.feature_combo.grid(row=0, column=3, padx=(8, 18), sticky="w")
+        self.feature_combo.grid(row=0, column=3, padx=(8, 18), sticky="ew")
         self.feature_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_feature_change())
 
-        ttk.Label(selectors, text="下载引擎", style="Muted.TLabel").grid(row=0, column=4, sticky="w")
-        self.engine_combo = ttk.Combobox(selectors, textvariable=self.engine_var, state="readonly", values=("smart", "builtin", "auto"), width=12)
-        self.engine_combo.grid(row=0, column=5, padx=(8, 18), sticky="w")
-
-        ttk.Label(selectors, text="速度", style="Muted.TLabel").grid(row=0, column=6, sticky="w")
-        self.speed_combo = ttk.Combobox(selectors, textvariable=self.speed_var, state="readonly", values=("stable", "balanced", "fast"), width=12)
-        self.speed_combo.grid(row=0, column=7, padx=(8, 0), sticky="w")
-
-        limits = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        limits.grid(row=1, column=0, sticky="ew", pady=(14, 0))
-        ttk.Label(limits, text="评论图片上限", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        self.comment_limit_entry = ttk.Entry(limits, textvariable=self.comment_limit_var, width=12)
-        self.comment_limit_entry.grid(row=0, column=1, padx=(8, 20), sticky="w")
-        self.collection_limit_label = ttk.Label(limits, text="收藏夹作品上限", style="Muted.TLabel")
-        self.collection_limit_label.grid(row=0, column=2, sticky="w")
-        self.collection_limit_entry = ttk.Entry(limits, textvariable=self.collection_limit_var, width=12)
-        self.collection_limit_entry.grid(row=0, column=3, padx=(8, 20), sticky="w")
-        ttk.Label(limits, text="留空表示尽量全部；网络不稳时建议 balanced 或 stable。", style="Hint.TLabel").grid(row=0, column=4, sticky="w")
+        ttk.Label(selectors, text="模式", style="Muted.TLabel").grid(row=0, column=4, sticky="w")
+        mode_frame = ttk.Frame(selectors, style="PanelInner.TFrame")
+        mode_frame.grid(row=0, column=5, sticky="ew", padx=(8, 0))
+        self.mode_batch_radio = ttk.Radiobutton(mode_frame, text="批量", variable=self.run_mode_var, value="批量", command=self._mark_mode_manual)
+        self.mode_batch_radio.grid(row=0, column=0, sticky="w")
+        self.mode_single_radio = ttk.Radiobutton(mode_frame, text="单个", variable=self.run_mode_var, value="单个", command=self._mark_mode_manual)
+        self.mode_single_radio.grid(row=0, column=1, sticky="w", padx=(14, 0))
 
         collection_bar = ttk.Frame(input_panel, style="PanelInner.TFrame")
         collection_bar.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        collection_bar.columnconfigure(3, weight=1)
+        collection_bar.columnconfigure(1, weight=1)
         self.collection_label_widget = ttk.Label(collection_bar, text="收藏夹", style="Muted.TLabel")
         self.collection_label_widget.grid(row=0, column=0, sticky="w")
         self.collection_combo = ttk.Combobox(collection_bar, textvariable=self.collection_var, state="readonly", values=(), width=32)
-        self.collection_combo.grid(row=0, column=1, padx=(8, 10), sticky="w")
+        self.collection_combo.grid(row=0, column=1, padx=(8, 10), sticky="ew")
         self.collection_combo.bind("<<ComboboxSelected>>", lambda _event: self._select_collection())
         self.refresh_collections_button = ttk.Button(collection_bar, text="刷新收藏夹列表", style="Secondary.TButton", command=self.refresh_collections)
         self.refresh_collections_button.grid(row=0, column=2, sticky="w")
-        ttk.Label(collection_bar, text="手动 ID", style="Muted.TLabel").grid(row=0, column=3, sticky="e", padx=(10, 8))
-        self.collection_id_entry = ttk.Entry(collection_bar, textvariable=self.collection_id_var, width=24)
-        self.collection_id_entry.grid(row=0, column=4, sticky="e")
 
-        ttk.Label(input_panel, text="输入链接 / 分享文案", style="PanelTitle.TLabel").grid(row=3, column=0, sticky="w", pady=(16, 0))
+        advanced_header = ttk.Frame(input_panel, style="PanelInner.TFrame")
+        advanced_header.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        advanced_header.columnconfigure(0, weight=1)
+        ttk.Label(advanced_header, text="普通任务无需调整高级设置", style="Hint.TLabel").grid(row=0, column=0, sticky="w")
+        self.advanced_button = ttk.Button(advanced_header, text="高级设置 ▾", style="Secondary.TButton", command=self.toggle_advanced)
+        self.advanced_button.grid(row=0, column=1, sticky="e")
+
+        self.advanced_frame = ttk.Frame(input_panel, style="Advanced.TFrame", padding=(16, 14, 16, 14))
+        self.advanced_frame.columnconfigure(1, weight=1)
+        self.advanced_frame.columnconfigure(3, weight=1)
+        ttk.Label(self.advanced_frame, text="下载引擎", style="AdvancedMuted.TLabel").grid(row=0, column=0, sticky="w")
+        self.engine_combo = ttk.Combobox(self.advanced_frame, textvariable=self.engine_var, state="readonly", values=("smart", "builtin", "auto"), width=14)
+        self.engine_combo.grid(row=0, column=1, sticky="ew", padx=(8, 20))
+        ttk.Label(self.advanced_frame, text="速度", style="AdvancedMuted.TLabel").grid(row=0, column=2, sticky="w")
+        self.speed_combo = ttk.Combobox(self.advanced_frame, textvariable=self.speed_var, state="readonly", values=("stable", "balanced", "fast"), width=14)
+        self.speed_combo.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        ttk.Label(self.advanced_frame, text="评论图片上限", style="AdvancedMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(12, 0))
+        self.comment_limit_entry = ttk.Entry(self.advanced_frame, textvariable=self.comment_limit_var, width=12)
+        self.comment_limit_entry.grid(row=1, column=1, sticky="ew", padx=(8, 20), pady=(12, 0))
+        self.collection_limit_label = ttk.Label(self.advanced_frame, text="收藏夹作品上限", style="AdvancedMuted.TLabel")
+        self.collection_limit_label.grid(row=1, column=2, sticky="w", pady=(12, 0))
+        self.collection_limit_entry = ttk.Entry(self.advanced_frame, textvariable=self.collection_limit_var, width=12)
+        self.collection_limit_entry.grid(row=1, column=3, sticky="ew", padx=(8, 0), pady=(12, 0))
+        ttk.Label(self.advanced_frame, text="手动 ID", style="AdvancedMuted.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        self.collection_id_entry = ttk.Entry(self.advanced_frame, textvariable=self.collection_id_var, width=24)
+        self.collection_id_entry.grid(row=2, column=1, sticky="ew", padx=(8, 20), pady=(12, 0))
+        ttk.Label(self.advanced_frame, text="留空表示尽量全部；网络不稳时建议 balanced 或 stable。", style="AdvancedHint.TLabel").grid(row=2, column=2, columnspan=2, sticky="w", pady=(12, 0))
+
+        input_header = ttk.Frame(input_panel, style="PanelInner.TFrame")
+        input_header.grid(row=5, column=0, sticky="ew", pady=(18, 0))
+        input_header.columnconfigure(1, weight=1)
+        ttk.Label(input_header, text="输入链接 / 分享文案", style="PanelTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.detected_label = ttk.Label(input_header, text="已识别：0 条内容", style="Hint.TLabel")
+        self.detected_label.grid(row=0, column=1, sticky="e")
         self.input_text = tk.Text(
             input_panel,
-            height=6,
+            height=7,
             wrap="word",
             font=("Microsoft YaHei UI", 10),
-            bg="#fbfbfd",
-            fg="#1d1d1f",
-            insertbackground="#0071e3",
+            bg="#fbfcfe",
+            fg="#172033",
+            insertbackground="#2f6bff",
             relief="flat",
-            padx=14,
-            pady=12,
+            padx=16,
+            pady=14,
             highlightthickness=1,
-            highlightbackground="#d2d2d7",
-            highlightcolor="#0071e3",
+            highlightbackground="#d8dee8",
+            highlightcolor="#2f6bff",
         )
-        self.input_text.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.input_text.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        self.input_text.bind("<KeyRelease>", lambda _event: self._update_detected_count())
 
         action_bar = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        action_bar.grid(row=5, column=0, sticky="ew", pady=(16, 0))
-        action_bar.columnconfigure(10, weight=1)
-        self.single_button = ttk.Button(action_bar, text="单个爬取", style="Primary.TButton", command=lambda: self.start(single=True))
-        self.single_button.grid(row=0, column=0, sticky="w")
-        self.batch_button = ttk.Button(action_bar, text="批量爬取", style="Primary.TButton", command=lambda: self.start(single=False))
-        self.batch_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
-        ttk.Button(action_bar, text="粘贴", style="Secondary.TButton", command=self.paste_clipboard).grid(row=0, column=2, sticky="w", padx=(10, 0))
-        ttk.Button(action_bar, text="清空", style="Secondary.TButton", command=self.clear_all).grid(row=0, column=3, sticky="w", padx=(10, 0))
-        self.login_douyin_button = ttk.Button(action_bar, text="登录抖音", style="Secondary.TButton", command=self.open_douyin_login)
-        self.login_douyin_button.grid(row=0, column=4, sticky="w", padx=(10, 0))
-        self.login_xhs_button = ttk.Button(action_bar, text="登录小红书", style="Secondary.TButton", command=self.open_xhs_login)
-        self.login_xhs_button.grid(row=0, column=5, sticky="w", padx=(10, 0))
-        self.check_login_button = ttk.Button(action_bar, text="检查登录状态", style="Secondary.TButton", command=self.check_login_status)
-        self.check_login_button.grid(row=0, column=6, sticky="w", padx=(10, 0))
-        self.open_output_button = ttk.Button(action_bar, text="打开输出文件夹", style="Secondary.TButton", command=self.open_output_dir)
-        self.open_output_button.grid(row=0, column=11, sticky="e")
+        action_bar.grid(row=7, column=0, sticky="ew", pady=(16, 0))
+        action_bar.columnconfigure(0, weight=1)
+        action_bar.columnconfigure(1, weight=0)
+        self.login_status_label = ttk.Label(action_bar, text="登录状态：需要下载收藏内容时请先登录", style="Hint.TLabel")
+        self.login_status_label.grid(row=0, column=0, sticky="w")
+        controls = ttk.Frame(action_bar, style="PanelInner.TFrame")
+        controls.grid(row=0, column=1, sticky="e")
+        self.paste_button = ttk.Button(controls, text="粘贴", style="Secondary.TButton", command=self.paste_clipboard)
+        self.paste_button.grid(row=0, column=0, sticky="w")
+        self.clear_button = ttk.Button(controls, text="清空", style="Secondary.TButton", command=self.clear_all)
+        self.clear_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.login_douyin_button = ttk.Button(controls, text="登录抖音", style="Secondary.TButton", command=self.open_douyin_login)
+        self.login_douyin_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.login_xhs_button = ttk.Button(controls, text="登录小红书", style="Secondary.TButton", command=self.open_xhs_login)
+        self.login_xhs_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.check_login_button = ttk.Button(controls, text="检查登录状态", style="Secondary.TButton", command=self.check_login_status)
+        self.check_login_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        self.start_button = ttk.Button(controls, text="开始下载", style="Primary.TButton", command=self.start_from_mode)
+        self.start_button.grid(row=0, column=5, sticky="e", padx=(16, 0))
 
-        status_panel = ttk.Frame(self, style="Panel.TFrame", padding=(22, 18, 22, 18))
+        self.status_panel = ttk.Frame(page, style="Panel.TFrame", padding=(24, 18, 24, 18))
+        status_panel = self.status_panel
         status_panel.grid(row=2, column=0, sticky="nsew", padx=28, pady=(0, 18))
         status_panel.columnconfigure(0, weight=1)
-        status_panel.rowconfigure(3, weight=1)
+        status_panel.rowconfigure(4, weight=1, minsize=0)
+        feedback_header = ttk.Frame(status_panel, style="PanelInner.TFrame")
+        feedback_header.grid(row=0, column=0, sticky="ew")
+        feedback_header.columnconfigure(0, weight=1)
+        ttk.Label(feedback_header, text="任务反馈", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.empty_state_label = ttk.Label(feedback_header, text="还没有任务，粘贴链接后点击开始下载。", style="Hint.TLabel")
+        self.empty_state_label.grid(row=0, column=1, sticky="e")
         stats = ttk.Frame(status_panel, style="PanelInner.TFrame")
-        stats.grid(row=0, column=0, sticky="ew")
+        stats.grid(row=1, column=0, sticky="ew", pady=(14, 0))
         for i in range(4):
             stats.columnconfigure(i, weight=1)
         self.total_value = self._stat_card(stats, 0, "总任务", "0")
@@ -205,7 +274,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.failed_value = self._stat_card(stats, 3, "失败", "0", "DangerStatValue.TLabel")
 
         progress_line = ttk.Frame(status_panel, style="PanelInner.TFrame")
-        progress_line.grid(row=1, column=0, sticky="ew", pady=(16, 0))
+        progress_line.grid(row=2, column=0, sticky="ew", pady=(14, 0))
         progress_line.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_line, mode="determinate", maximum=100, value=0)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -213,27 +282,35 @@ class UnifiedDownloaderApp(tk.Tk):
         self.status_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         log_header = ttk.Frame(status_panel, style="PanelInner.TFrame")
-        log_header.grid(row=2, column=0, sticky="ew", pady=(14, 8))
+        log_header.grid(row=3, column=0, sticky="ew", pady=(14, 0))
         log_header.columnconfigure(0, weight=1)
         ttk.Label(log_header, text="运行日志", style="PanelTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(log_header, text="复制失败摘要", style="Secondary.TButton", command=self.copy_failure_log).grid(row=0, column=1, sticky="e", padx=(8, 0))
-        ttk.Button(log_header, text="复制完整日志", style="Secondary.TButton", command=self.copy_all_log).grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.log_toggle_button = ttk.Button(log_header, text="展开日志 ▾", style="Secondary.TButton", command=self.toggle_log_panel)
+        self.log_toggle_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.copy_failure_button = ttk.Button(log_header, text="复制失败摘要", style="Secondary.TButton", command=self.copy_failure_log)
+        self.copy_failure_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.copy_all_button = ttk.Button(log_header, text="复制完整日志", style="Secondary.TButton", command=self.copy_all_log)
+        self.copy_all_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.clear_log_button = ttk.Button(log_header, text="清空日志", style="Secondary.TButton", command=self.clear_log)
+        self.clear_log_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
         self.log_box = scrolledtext.ScrolledText(
             status_panel,
             wrap="word",
             state="disabled",
+            height=12,
             font=("Consolas", 10),
-            bg="#111113",
-            fg="#f5f5f7",
-            insertbackground="#0071e3",
+            bg="#20242d",
+            fg="#eef2f8",
+            insertbackground="#2f6bff",
             relief="flat",
             padx=14,
             pady=12,
             highlightthickness=1,
-            highlightbackground="#2c2c2e",
-            highlightcolor="#3a3a3c",
+            highlightbackground="#303848",
+            highlightcolor="#435066",
         )
-        self.log_box.grid(row=3, column=0, sticky="nsew")
+        self.log_box.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
+        self.log_box.grid_remove()
         self.log_menu = tk.Menu(self, tearoff=0)
         self.log_menu.add_command(label="复制选中内容", command=lambda: self.log_box.event_generate("<<Copy>>"))
         self.log_menu.add_command(label="复制完整日志", command=self.copy_all_log)
@@ -243,7 +320,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.log_box.bind("<Button-3>", self.show_log_menu)
         self.log_box.bind("<Control-a>", self.select_all_log)
 
-        footer = ttk.Frame(self, style="Root.TFrame", padding=(28, 0, 28, 14))
+        footer = ttk.Frame(page, style="Root.TFrame", padding=(28, 0, 28, 14))
         footer.grid(row=3, column=0, sticky="ew")
         ttk.Label(footer, text=f"输出根目录：{OUTPUT_ROOT}", style="Subtitle.TLabel").grid(row=0, column=0, sticky="w")
 
@@ -255,9 +332,70 @@ class UnifiedDownloaderApp(tk.Tk):
         ttk.Label(card, text=label, style="StatLabel.TLabel").grid(row=1, column=0, sticky="w")
         return value_label
 
+    def _on_page_configure(self, _event: tk.Event | None = None) -> None:
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.scroll_canvas.itemconfigure(self.page_window, width=event.width)
+
+    def _on_mousewheel(self, event: tk.Event) -> str | None:
+        if event.widget in (self.input_text, self.log_box):
+            return None
+        self.scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
     @property
     def is_running(self) -> bool:
         return bool(self.worker and self.worker.is_alive())
+
+    def _bind_shortcuts(self) -> None:
+        self.bind("<Control-Return>", lambda _event: self.start_from_mode())
+        self.bind("<Control-l>", lambda _event: self.focus_input())
+        self.bind("<Control-L>", lambda _event: self.focus_input())
+
+    def focus_input(self) -> str:
+        if str(self.input_text.cget("state")) != "disabled":
+            self.input_text.focus_set()
+        return "break"
+
+    def start_from_mode(self) -> None:
+        self.start(single=self.run_mode_var.get() == "单个")
+
+    def _mark_mode_manual(self) -> None:
+        self.mode_manually_selected = True
+
+    def toggle_advanced(self) -> None:
+        visible = not self.advanced_visible.get()
+        self.advanced_visible.set(visible)
+        if visible:
+            self.advanced_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+            self.advanced_button.configure(text="高级设置 ▴")
+        else:
+            self.advanced_frame.grid_remove()
+            self.advanced_button.configure(text="高级设置 ▾")
+
+    def toggle_log_panel(self) -> None:
+        visible = not self.log_visible.get()
+        self.log_visible.set(visible)
+        if visible:
+            self.status_panel.rowconfigure(4, minsize=220)
+            self.log_box.grid()
+            self.log_toggle_button.configure(text="收起日志 ▴")
+            self.after_idle(lambda: self.scroll_canvas.yview_moveto(1.0))
+        else:
+            self.status_panel.rowconfigure(4, minsize=0)
+            self.log_box.grid_remove()
+            self.log_toggle_button.configure(text="展开日志 ▾")
+
+    def _update_detected_count(self) -> None:
+        if self.feature_var.get() in {"收藏夹", "收藏视频", "收藏作品"}:
+            self.detected_label.configure(text="收藏内容将按所选入口下载")
+            return
+        text = self.input_text.get("1.0", "end").strip()
+        count = len(extract_task_inputs(self.platform_var.get(), text, single=False)) if text else 0
+        if not self.mode_manually_selected:
+            self.run_mode_var.set("批量" if count > 1 else "单个")
+        self.detected_label.configure(text=f"已识别：{count} 条内容")
 
     def _on_platform_change(self) -> None:
         if self.platform_var.get() == "小红书":
@@ -287,6 +425,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.input_text.configure(state="disabled")
         else:
             self.input_text.configure(state="normal")
+        self._update_detected_count()
 
     def paste_clipboard(self) -> None:
         try:
@@ -298,6 +437,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.input_text.delete("1.0", "end")
         self.input_text.insert("1.0", text)
         self._on_feature_change()
+        self._update_detected_count()
 
     def copy_all_log(self) -> None:
         text = self.log_box.get("1.0", "end-1c")
@@ -311,6 +451,10 @@ class UnifiedDownloaderApp(tk.Tk):
         summary = "\n".join(lines[-120:]) if lines else text[-4000:]
         self._copy_text(summary)
         self.status_label.configure(text="已复制失败摘要")
+
+    def clear_log(self) -> None:
+        self._set_log("")
+        self.status_label.configure(text="日志已清空")
 
     def _copy_text(self, text: str) -> None:
         self.clipboard_clear()
@@ -333,9 +477,12 @@ class UnifiedDownloaderApp(tk.Tk):
         self.input_text.delete("1.0", "end")
         self.collection_id_var.set("")
         self.collection_var.set("")
+        self.mode_manually_selected = False
+        self.run_mode_var.set("单个")
         self._set_log("")
         self._reset_stats()
         self._on_feature_change()
+        self._update_detected_count()
 
     def open_douyin_login(self) -> None:
         try:
@@ -344,6 +491,7 @@ class UnifiedDownloaderApp(tk.Tk):
             messagebox.showerror("打开失败", str(exc))
             return
         self._append_log(f"已打开抖音登录窗口。扫码登录一次后将复用：{profile_dir}\n")
+        self.login_status_label.configure(text="登录状态：抖音登录窗口已打开")
 
     def open_xhs_login(self) -> None:
         try:
@@ -357,6 +505,7 @@ class UnifiedDownloaderApp(tk.Tk):
             messagebox.showerror("打开失败", str(exc))
             return
         self._append_log(f"已打开小红书登录窗口。登录态目录：{profile_dir}\n")
+        self.login_status_label.configure(text="登录状态：小红书登录窗口已打开")
 
     def check_login_status(self) -> None:
         def worker() -> None:
@@ -366,8 +515,10 @@ class UnifiedDownloaderApp(tk.Tk):
                     cookie_count = len([part for part in str(context.get("cookie") or "").split(";") if part.strip()])
                     if cookie_count and not context.get("loginRequired"):
                         self.log_queue.put(("log", f"抖音登录态可用：Cookie {cookie_count} 个"))
+                        self.log_queue.put(("login_status", "抖音登录态可用"))
                     else:
                         self.log_queue.put(("log", "抖音登录态不可用或已失效，请点击“登录抖音”。"))
+                        self.log_queue.put(("login_status", "抖音未登录或已失效"))
                 else:
                     context = xiaohongshu.read_xhs_login_context()
                     cookie_count = len([part for part in str(context.get("cookie") or "").split(";") if part.strip()])
@@ -376,12 +527,16 @@ class UnifiedDownloaderApp(tk.Tk):
                     is_guest = bool(data.get("guest"))
                     if cookie_count and not is_guest and not context.get("loginRequired"):
                         self.log_queue.put(("log", f"小红书账号登录态可用：Cookie {cookie_count} 个"))
+                        self.log_queue.put(("login_status", "小红书账号登录态可用"))
                     elif cookie_count:
                         self.log_queue.put(("log", f"小红书浏览器态可用但当前是游客态：Cookie {cookie_count} 个。公开作品和部分评论可用，收藏作品需要扫码登录账号。"))
+                        self.log_queue.put(("login_status", "小红书当前为游客态"))
                     else:
                         self.log_queue.put(("log", "小红书登录态不可用或已失效，请点击“登录小红书”。"))
+                        self.log_queue.put(("login_status", "小红书未登录或已失效"))
             except Exception as exc:  # noqa: BLE001
                 self.log_queue.put(("log", f"检查登录状态失败：{exc}"))
+                self.log_queue.put(("login_status", "登录状态检查失败"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -424,6 +579,7 @@ class UnifiedDownloaderApp(tk.Tk):
         OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         self._set_buttons_state("disabled")
         self._reset_stats(total=1 if options.feature in {"收藏夹", "收藏视频", "收藏作品"} else len(options.inputs))
+        self.empty_state_label.configure(text="任务运行中，请等待下载完成。")
         self._append_log(f"开始任务：平台={options.platform}，功能={options.feature}\n")
         self.worker = threading.Thread(target=self._run_worker, args=(options,), daemon=True)
         self.worker.start()
@@ -496,6 +652,8 @@ class UnifiedDownloaderApp(tk.Tk):
                     self._on_feature_change()
                 elif event == "collections_done":
                     self._on_feature_change()
+                elif event == "login_status":
+                    self.login_status_label.configure(text=f"登录状态：{payload}")
                 elif event == "task_success":
                     report = payload if isinstance(payload, dict) else {}
                     failures = report.get("failures") if isinstance(report.get("failures"), list) else []
@@ -511,6 +669,7 @@ class UnifiedDownloaderApp(tk.Tk):
                 elif event == "all_done":
                     self._set_buttons_state("normal")
                     self.status_label.configure(text=f"完成：成功 {self.success_tasks}，失败 {self.failed_tasks}")
+                    self.empty_state_label.configure(text="任务完成，可打开输出文件夹或复制日志。")
                     messagebox.showinfo("完成", f"任务完成：成功 {self.success_tasks}，失败 {self.failed_tasks}")
         except queue.Empty:
             pass
@@ -528,6 +687,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.failed_tasks = 0
         self._refresh_stats()
         self.status_label.configure(text="等待任务" if total == 0 else "准备开始")
+        self.empty_state_label.configure(text="还没有任务，粘贴链接后点击开始下载。" if total == 0 else "任务已创建，等待执行。")
 
     def _refresh_stats(self) -> None:
         self.total_value.configure(text=str(self.total_tasks))
@@ -539,17 +699,30 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _set_buttons_state(self, state: str) -> None:
         readonly = "readonly" if state == "normal" else "disabled"
-        self.single_button.configure(state=state)
-        self.batch_button.configure(state=state)
+        self.start_button.configure(state=state)
+        self.mode_batch_radio.configure(state=state)
+        self.mode_single_radio.configure(state=state)
         self.platform_combo.configure(state=readonly)
         self.feature_combo.configure(state=readonly)
         self.engine_combo.configure(state=readonly)
         self.speed_combo.configure(state=readonly)
+        self.advanced_button.configure(state=state)
         self.comment_limit_entry.configure(state=state)
         self.collection_limit_entry.configure(state=state)
-        for button in (self.login_douyin_button, self.login_xhs_button, self.check_login_button, self.open_output_button):
+        for button in (
+            self.paste_button,
+            self.clear_button,
+            self.login_douyin_button,
+            self.login_xhs_button,
+            self.check_login_button,
+        ):
             if button is not None:
                 button.configure(state=state)
+        if self.open_output_button is not None:
+            self.open_output_button.configure(state="normal")
+        for button in (self.copy_failure_button, self.copy_all_button, self.clear_log_button):
+            if button is not None:
+                button.configure(state="normal")
         self._on_feature_change()
 
     def _append_log(self, text: str) -> None:

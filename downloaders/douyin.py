@@ -21,6 +21,7 @@ from typing import Callable, Iterable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
 
@@ -43,9 +44,10 @@ BASE_HEADERS = {
 
 ACTIVE_PROXIES: list["HeaderProxyServer"] = []
 DOUYIN_LOGIN_URL = "https://www.douyin.com/"
-APP_VERSION = "2026-07-15-douyin-nowm-image-v1"
+APP_VERSION = "2026-07-16-speed-v4"
 NO_WINDOW_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 IDM_LARGE_FILE_THRESHOLD = 80 * 1024 * 1024
+IDM_VIDEO_FILE_THRESHOLD = 20 * 1024 * 1024
 
 
 def format_bytes(size: int) -> str:
@@ -69,13 +71,14 @@ class DownloadEngine:
     idm_path: Path | None = None
     proxy: "HeaderProxyServer | None" = None
     idm_threshold_bytes: int = IDM_LARGE_FILE_THRESHOLD
+    idm_video_threshold_bytes: int = IDM_VIDEO_FILE_THRESHOLD
 
     @property
     def name(self) -> str:
         if self.mode == "idm" and self.idm_path:
             return f"IDM ({self.idm_path})"
         if self.mode == "smart" and self.idm_path:
-            return f"智能模式（>{format_bytes(self.idm_threshold_bytes)} 用 IDM）"
+            return f"智能模式（视频>{format_bytes(self.idm_video_threshold_bytes)}或大小未知用 IDM）"
         return "内置下载器"
 
     def should_use_idm(self, size: int) -> bool:
@@ -85,6 +88,15 @@ class DownloadEngine:
             return True
         if self.mode == "smart":
             return size >= self.idm_threshold_bytes
+        return False
+
+    def should_use_idm_for_video(self, size: int) -> bool:
+        if not self.idm_path or not self.proxy:
+            return False
+        if self.mode == "idm":
+            return True
+        if self.mode == "smart":
+            return size == 0 or size >= self.idm_video_threshold_bytes
         return False
 
 
@@ -188,9 +200,15 @@ def download_note(
     logger("评论区图片策略：优先读取 comment/list 接口 origin_url 原图，DOM 缩略图只作兜底。")
 
     session = make_session(cookie_header=cookie_header)
-    html_text, final_url = fetch_page(session, source_url)
+    html_text = ""
+    final_url = source_url
+    try:
+        html_text, final_url = fetch_page(session, source_url)
+    except DouyinDownloadError as exc:
+        logger(f"页面读取失败，继续使用详情接口/内置浏览器兜底：{exc}")
+        final_url = resolve_final_url(session, source_url) or source_url
     aweme_id = extract_aweme_id(final_url) or extract_aweme_id(source_url)
-    aweme = find_aweme(html_text, aweme_id)
+    aweme = find_aweme(html_text, aweme_id) if html_text else {}
     browser_captured = False
     if not aweme and aweme_id:
         aweme = fetch_aweme_detail(session, aweme_id, final_url)
@@ -249,7 +267,22 @@ def download_note(
         "images": [],
         "videos": [],
         "failures": [],
+        "skipped": [],
     }
+
+    existing_media_names = existing_media_filenames(note_dir)
+    if videos and has_existing_aweme_nowm_video(note_dir, aweme_id, existing_media_names):
+        logger(f"已存在无水印视频，跳过下载：{aweme_id}")
+        report["skipped"].append({"aweme_id": aweme_id, "reason": "exists_nowm_video"})
+        report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        report["elapsed_seconds"] = 0
+        return report
+    if images and not videos and has_existing_aweme_nowm_images(note_dir, aweme_id, existing_media_names):
+        logger(f"已存在无水印原图下载结果，跳过下载：{aweme_id}")
+        report["skipped"].append({"aweme_id": aweme_id, "reason": "exists_nowm_orig_images"})
+        report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        report["elapsed_seconds"] = 0
+        return report
 
     engine = make_download_engine(use_idm)
     report["download_engine"] = engine.name
@@ -416,6 +449,9 @@ def read_comment_image_snapshot(url: str, limit: int | None, logger: LogFn) -> d
 def make_session(cookie_header: str = "") -> requests.Session:
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
+    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     if cookie_header:
         session.headers["Cookie"] = cookie_header
     return session
@@ -539,6 +575,16 @@ def fetch_page(session: requests.Session, url: str) -> tuple[str, str]:
         raise DouyinDownloadError(f"请求作品页面失败（HTTP {response.status_code}）。")
     response.encoding = response.apparent_encoding or response.encoding
     return response.text, response.url
+
+
+def resolve_final_url(session: requests.Session, url: str) -> str:
+    headers = dict(BASE_HEADERS)
+    headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    try:
+        with session.get(url, headers=headers, timeout=(5, 8), allow_redirects=True, stream=True) as response:
+            return response.url or url
+    except requests.RequestException:
+        return url
 
 
 def find_aweme(page_html: str, aweme_id: str = "") -> dict:
@@ -781,30 +827,23 @@ def read_builtin_browser_aweme_snapshot(browser_path: str, url: str) -> dict:
     except ImportError as exc:
         raise DouyinDownloadError("缺少 websocket-client 依赖，请重新运行启动脚本安装依赖。") from exc
 
-    with tempfile.TemporaryDirectory(prefix="douyin_cdp_profile_") as profile_dir:
-        process = subprocess.Popen(
-            [
-                browser_path,
-                "--remote-debugging-port=0",
-                "--remote-allow-origins=*",
-                f"--user-data-dir={profile_dir}",
-                "--no-first-run",
-                "--disable-default-apps",
-                "--disable-popup-blocking",
-                "--mute-audio",
-                "--autoplay-policy=document-user-activation-required",
-                "--disable-features=PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies",
-                "--window-size=1280,900",
-                "--window-position=-32000,-32000",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **NO_WINDOW_KWARGS,
-        )
+    profile_dir = douyin_browser_profile_dir()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    process: subprocess.Popen | None = None
+    reuse_existing = False
+    try:
+        port, process, reuse_existing = open_comment_cdp_port(browser_path, profile_dir)
         try:
-            port = wait_for_devtools_port(Path(profile_dir) / "DevToolsActivePort")
-            target = create_cdp_target(port)
+            try:
+                target = create_cdp_target(port)
+            except Exception:
+                if process is not None and not reuse_existing:
+                    terminate_process(process)
+                process = None
+                reuse_existing = False
+                remove_devtools_port_file(profile_dir)
+                port, process, reuse_existing = open_comment_cdp_port(browser_path, profile_dir, force_new=True)
+                target = create_cdp_target(port)
             ws_url = str(target.get("webSocketDebuggerUrl") or "")
             if not ws_url:
                 raise DouyinDownloadError("Chrome DevTools 没有返回 WebSocket 地址。")
@@ -824,14 +863,10 @@ def read_builtin_browser_aweme_snapshot(browser_path: str, url: str) -> dict:
                 except Exception:
                     pass
         finally:
-            try:
-                process.terminate()
-                process.wait(timeout=5)
-            except Exception:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
+            pass
+    finally:
+        if process is not None and not reuse_existing:
+            terminate_process(process)
 
 
 def read_builtin_browser_comment_snapshot(url: str, limit: int | None = None) -> dict:
@@ -2558,18 +2593,20 @@ def download_media_task(kind: str, index: int, payload, note_dir: Path, final_ur
         prefix = f"{file_prefix}_" if file_prefix else ""
         watermark_tag = "wm" if result.candidate.watermark else "nowm"
         target = unique_path(note_dir / f"{prefix}video_{index:03d}_{watermark_tag}.mp4")
-        bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url)
+        declared_dimensions = candidate_dimensions(result.candidate)
+        used_idm = media_will_use_idm(engine, result)
+        bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url, declared_dimensions)
         item = {
             "index": index,
             "status": "ok",
             "file": str(target),
             "bytes": bytes_count,
             "dimensions": dimensions,
-            "declared_dimensions": candidate_dimensions(result.candidate),
+            "declared_dimensions": declared_dimensions,
             "source": result.candidate.source,
             "codec": result.candidate.codec,
             "url": result.candidate.url,
-            "engine": engine.mode,
+            "engine": "idm" if used_idm else engine.mode,
             "elapsed_seconds": round(time.perf_counter() - start, 3),
         }
         return {"kind": kind, "item": item}
@@ -2705,14 +2742,20 @@ def save_or_enqueue_media(
     result: MediaProbeResult,
     target: Path,
     referer: str,
+    declared_dimensions: str = "",
 ) -> tuple[int, str]:
     if result.candidate.audio_url:
-        return download_and_merge_media(session, result.candidate.url, result.candidate.audio_url, target, referer)
+        return download_and_merge_media(session, result.candidate.url, result.candidate.audio_url, target, referer, declared_dimensions)
     size = result.content_length or result.candidate.declared_size
-    if engine.should_use_idm(size):
+    if engine.should_use_idm_for_video(size):
         enqueue_idm(engine, result.candidate.url, target, referer)
-        return size, ""
-    return download_media(session, result.candidate.url, target, referer)
+        return size, declared_dimensions
+    return download_media(session, result.candidate.url, target, referer, declared_dimensions)
+
+
+def media_will_use_idm(engine: DownloadEngine, result: MediaProbeResult) -> bool:
+    size = result.content_length or result.candidate.declared_size
+    return engine.should_use_idm_for_video(size)
 
 
 def enqueue_idm(engine: DownloadEngine, url: str, target: Path, referer: str) -> None:
@@ -2727,9 +2770,9 @@ def enqueue_idm(engine: DownloadEngine, url: str, target: Path, referer: str) ->
         raise DouyinDownloadError(f"投递 IDM 失败：{exc}") from exc
 
 
-def download_media(session: requests.Session, url: str, target: Path, referer: str) -> tuple[int, str]:
+def download_media(session: requests.Session, url: str, target: Path, referer: str, declared_dimensions: str = "") -> tuple[int, str]:
     bytes_count = download_binary(session, url, target, referer, accept="video/mp4,video/*,*/*;q=0.8")
-    return bytes_count, probe_video_dimensions(target)
+    return bytes_count, declared_dimensions or probe_video_dimensions(target)
 
 
 def download_binary(session: requests.Session, url: str, target: Path, referer: str, accept: str = "*/*") -> int:
@@ -2762,6 +2805,7 @@ def download_and_merge_media(
     audio_url: str,
     target: Path,
     referer: str,
+    declared_dimensions: str = "",
 ) -> tuple[int, str]:
     ffmpeg = find_executable("ffmpeg")
     if not ffmpeg:
@@ -2802,7 +2846,7 @@ def download_and_merge_media(
             detail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
             raise DouyinDownloadError("音视频合并失败：" + " ".join(detail))
         shutil.move(str(merged_path), str(target))
-    return target.stat().st_size, probe_video_dimensions(target)
+    return target.stat().st_size, declared_dimensions or probe_video_dimensions(target)
 
 
 def extract_browser_video_streams(final_url: str, aweme: dict, logger: LogFn) -> list[dict]:
@@ -3133,6 +3177,37 @@ def safe_filename(value: str, limit: int = 80) -> str:
     if not cleaned:
         cleaned = "未命名"
     return cleaned[:limit].rstrip(" .") or "未命名"
+
+
+def has_existing_aweme_nowm_video(output_root: Path, aweme_id: str, media_names: list[str] | None = None) -> bool:
+    if not aweme_id:
+        return False
+    if media_names is not None:
+        return any(aweme_id in name and "_nowm" in name.lower() and name.lower().endswith(".mp4") for name in media_names)
+    return any(output_root.glob(f"*{aweme_id}*video_*_nowm.mp4"))
+
+
+def has_existing_aweme_nowm_images(output_root: Path, aweme_id: str, media_names: list[str] | None = None) -> bool:
+    if not aweme_id:
+        return False
+    suffixes = (".jpg", ".jpeg", ".png", ".webp")
+    if media_names is not None:
+        return any(aweme_id in name and "_nowm_orig_" in name.lower() and name.lower().endswith(suffixes) for name in media_names)
+    patterns = [
+        f"*{aweme_id}*_*_nowm_orig_*.jpg",
+        f"*{aweme_id}*_*_nowm_orig_*.jpeg",
+        f"*{aweme_id}*_*_nowm_orig_*.png",
+        f"*{aweme_id}*_*_nowm_orig_*.webp",
+    ]
+    return any(any(output_root.glob(pattern)) for pattern in patterns)
+
+
+def existing_media_filenames(output_root: Path) -> list[str]:
+    suffixes = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
+    try:
+        return [path.name for path in output_root.iterdir() if path.is_file() and path.suffix.lower() in suffixes]
+    except OSError:
+        return []
 
 
 def unique_path(path: Path) -> Path:
