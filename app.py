@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
-from downloaders import douyin, xiaohongshu
+from downloaders import bilibili, douyin, xiaohongshu
 from downloaders.douyin_collection import DouyinCollectionError, list_collections, read_douyin_login_context
 from services.task_runner import TaskOptions, extract_task_inputs, run_task
 
@@ -21,6 +21,7 @@ else:
 OUTPUT_ROOT = APP_DIR / "下载结果"
 DOUYIN_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图片", "收藏夹")
 XHS_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图片", "收藏作品")
+BILIBILI_FEATURES = ("视频媒体",)
 
 
 class UnifiedDownloaderApp(tk.Tk):
@@ -54,6 +55,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.log_visible = tk.BooleanVar(value=False)
         self.login_douyin_button: ttk.Button | None = None
         self.login_xhs_button: ttk.Button | None = None
+        self.login_bilibili_button: ttk.Button | None = None
         self.check_login_button: ttk.Button | None = None
         self.open_output_button: ttk.Button | None = None
         self.paste_button: ttk.Button | None = None
@@ -138,7 +140,7 @@ class UnifiedDownloaderApp(tk.Tk):
         header.columnconfigure(0, weight=1)
         header.columnconfigure(1, weight=0)
         ttk.Label(header, text="融合下载器", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="选择来源，粘贴内容，开始下载。抖音与小红书作品、评论图片、收藏夹与专辑统一处理。", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(header, text="选择来源，粘贴内容，开始下载。支持抖音、小红书与 Bilibili 最高质量视频。", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.open_output_button = ttk.Button(header, text="打开输出文件夹", style="Secondary.TButton", command=self.open_output_dir)
         self.open_output_button.grid(row=0, column=1, rowspan=2, sticky="e")
 
@@ -152,7 +154,7 @@ class UnifiedDownloaderApp(tk.Tk):
         for column in (1, 3, 5):
             selectors.columnconfigure(column, weight=1)
         ttk.Label(selectors, text="平台", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        self.platform_combo = ttk.Combobox(selectors, textvariable=self.platform_var, state="readonly", values=("抖音", "小红书"), width=12)
+        self.platform_combo = ttk.Combobox(selectors, textvariable=self.platform_var, state="readonly", values=("抖音", "小红书", "Bilibili"), width=12)
         self.platform_combo.grid(row=0, column=1, padx=(8, 18), sticky="ew")
         self.platform_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_platform_change())
 
@@ -248,10 +250,12 @@ class UnifiedDownloaderApp(tk.Tk):
         self.login_douyin_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
         self.login_xhs_button = ttk.Button(controls, text="登录小红书", style="Secondary.TButton", command=self.open_xhs_login)
         self.login_xhs_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.login_bilibili_button = ttk.Button(controls, text="登录 Bilibili", style="Secondary.TButton", command=self.open_bilibili_login)
+        self.login_bilibili_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
         self.check_login_button = ttk.Button(controls, text="检查登录状态", style="Secondary.TButton", command=self.check_login_status)
-        self.check_login_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        self.check_login_button.grid(row=0, column=5, sticky="w", padx=(8, 0))
         self.start_button = ttk.Button(controls, text="开始下载", style="Primary.TButton", command=self.start_from_mode)
-        self.start_button.grid(row=0, column=5, sticky="e", padx=(16, 0))
+        self.start_button.grid(row=0, column=6, sticky="e", padx=(16, 0))
 
         self.status_panel = ttk.Frame(page, style="Panel.TFrame", padding=(24, 18, 24, 18))
         status_panel = self.status_panel
@@ -398,18 +402,38 @@ class UnifiedDownloaderApp(tk.Tk):
         self.detected_label.configure(text=f"已识别：{count} 条内容")
 
     def _on_platform_change(self) -> None:
-        if self.platform_var.get() == "小红书":
+        platform = self.platform_var.get()
+        if platform == "Bilibili":
+            self.feature_combo.configure(values=BILIBILI_FEATURES)
+            self.feature_var.set("视频媒体")
+            self.login_douyin_button.grid_remove()
+            self.login_xhs_button.grid_remove()
+            self.login_bilibili_button.grid()
+            self.check_login_button.grid()
+            self.login_status_label.configure(text="Bilibili：未登录下载公开最高画质；登录后按账号权限选择最高画质")
+        elif platform == "小红书":
             self.feature_combo.configure(values=XHS_FEATURES)
             if self.feature_var.get() not in XHS_FEATURES:
                 self.feature_var.set("作品媒体")
+            self.login_douyin_button.grid_remove()
+            self.login_xhs_button.grid()
+            self.login_bilibili_button.grid_remove()
+            self.check_login_button.grid()
+            self.login_status_label.configure(text="登录状态：需要下载收藏内容时请先登录小红书")
         else:
             self.feature_combo.configure(values=DOUYIN_FEATURES)
             if self.feature_var.get() not in DOUYIN_FEATURES:
                 self.feature_var.set("作品媒体")
+            self.login_douyin_button.grid()
+            self.login_xhs_button.grid_remove()
+            self.login_bilibili_button.grid_remove()
+            self.check_login_button.grid()
+            self.login_status_label.configure(text="登录状态：需要下载收藏内容时请先登录抖音")
         self._on_feature_change()
 
     def _on_feature_change(self) -> None:
         is_xhs = self.platform_var.get() == "小红书"
+        is_bilibili = self.platform_var.get() == "Bilibili"
         is_collection = self.feature_var.get() in {"收藏夹", "收藏视频", "收藏作品"}
         state = "readonly" if is_collection and not self.is_running else "disabled"
         entry_state = "normal" if is_collection and not is_xhs and not self.is_running else "disabled"
@@ -425,6 +449,11 @@ class UnifiedDownloaderApp(tk.Tk):
             self.input_text.configure(state="disabled")
         else:
             self.input_text.configure(state="normal")
+        regular_state = "disabled" if is_bilibili or self.is_running else "normal"
+        combo_state = "disabled" if is_bilibili or self.is_running else "readonly"
+        self.engine_combo.configure(state=combo_state)
+        self.comment_limit_entry.configure(state=regular_state)
+        self.collection_limit_entry.configure(state=regular_state)
         self._update_detected_count()
 
     def paste_clipboard(self) -> None:
@@ -507,10 +536,30 @@ class UnifiedDownloaderApp(tk.Tk):
         self._append_log(f"已打开小红书登录窗口。登录态目录：{profile_dir}\n")
         self.login_status_label.configure(text="登录状态：小红书登录窗口已打开")
 
+    def open_bilibili_login(self) -> None:
+        try:
+            profile_dir = bilibili.open_bilibili_login_browser()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("打开失败", str(exc))
+            return
+        self._append_log(f"已打开 Bilibili 登录窗口。登录成功后将复用：{profile_dir}\n")
+        self.login_status_label.configure(text="登录状态：Bilibili 登录窗口已打开")
+
     def check_login_status(self) -> None:
         def worker() -> None:
             try:
-                if self.platform_var.get() == "抖音":
+                if self.platform_var.get() == "Bilibili":
+                    context = bilibili.read_bilibili_login_context()
+                    if context.get("vip"):
+                        self.log_queue.put(("log", "Bilibili 大会员登录态可用，可自动选择会员最高画质。"))
+                        self.log_queue.put(("login_status", "Bilibili 大会员登录态可用"))
+                    elif context.get("logged_in"):
+                        self.log_queue.put(("log", "Bilibili 普通账号登录态可用，将选择账号可用最高画质。"))
+                        self.log_queue.put(("login_status", "Bilibili 普通账号登录态可用"))
+                    else:
+                        self.log_queue.put(("log", "Bilibili 当前未登录，只能获取公开最高画质。"))
+                        self.log_queue.put(("login_status", "Bilibili 未登录"))
+                elif self.platform_var.get() == "抖音":
                     context = read_douyin_login_context()
                     cookie_count = len([part for part in str(context.get("cookie") or "").split(";") if part.strip()])
                     if cookie_count and not context.get("loginRequired"):
@@ -714,6 +763,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.clear_button,
             self.login_douyin_button,
             self.login_xhs_button,
+            self.login_bilibili_button,
             self.check_login_button,
         ):
             if button is not None:

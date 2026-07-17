@@ -19,15 +19,19 @@ $argsList = @(
     "--name", $exeName
 )
 
+$argsList += @("--collect-all", "yt_dlp")
+
 $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
-if ($ffmpeg) {
-    $argsList += @("--add-binary", "$($ffmpeg.Source);.")
+if (-not $ffmpeg) {
+    throw "ffmpeg.exe was not found. Packaging stopped because Bilibili highest-quality downloads require bundled FFmpeg."
 }
+$argsList += @("--add-binary", "$($ffmpeg.Source);.")
 
 $ffprobe = Get-Command ffprobe.exe -ErrorAction SilentlyContinue
-if ($ffprobe) {
-    $argsList += @("--add-binary", "$($ffprobe.Source);.")
+if (-not $ffprobe) {
+    throw "ffprobe.exe was not found. Packaging stopped because packaged downloads must verify both video and audio streams."
 }
+$argsList += @("--add-binary", "$($ffprobe.Source);.")
 
 $argsList += "app.py"
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from downloaders import douyin, xiaohongshu
+from downloaders import bilibili, douyin, xiaohongshu
 from downloaders.douyin_collection import download_collection
 
 
@@ -27,7 +27,9 @@ class TaskOptions:
 
 
 def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
-    if platform == "小红书":
+    if platform == "Bilibili":
+        urls = bilibili.extract_urls(text)
+    elif platform == "小红书":
         urls = xiaohongshu.extract_urls(text)
     else:
         urls = douyin.extract_urls(text)
@@ -37,6 +39,8 @@ def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
 
 
 def run_task(options: TaskOptions, log: LogFn) -> dict:
+    if options.platform == "Bilibili":
+        return run_bilibili_urls(options, log)
     if options.platform == "小红书":
         if options.feature in {"收藏作品", "收藏视频", "收藏夹"}:
             return xiaohongshu.download_collection(
@@ -61,6 +65,48 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
             use_idm=options.download_engine,
         )
     return run_douyin_urls(options, log)
+
+
+def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
+    reports = []
+    failures = []
+    root = options.output_root
+    try:
+        login_context = bilibili.read_bilibili_login_context()
+    except Exception as exc:  # noqa: BLE001 - public formats remain available without login.
+        login_context = {"cookie": "", "logged_in": False, "vip": False}
+        log(f"读取 Bilibili 登录态失败，将按未登录下载：{exc}")
+    cookie_header = str(login_context.get("cookie") or "")
+    if login_context.get("vip"):
+        log("Bilibili 大会员登录态可用：将自动选择账号可用的最高画质。")
+    elif login_context.get("logged_in"):
+        log("Bilibili 普通账号登录态可用：将自动选择账号可用的最高画质。")
+    else:
+        log("Bilibili 当前未登录：将下载公开可用的最高画质；大会员 4K/高帧率不会出现在候选中。")
+
+    def run_one(index: int, url: str, per_item_workers: int) -> dict:
+        log(f"\n===== Bilibili 任务 {index}/{len(options.inputs)} =====")
+        log(url)
+        try:
+            report = bilibili.download_video(
+                url, root, log=log, max_workers=per_item_workers, cookie_header=cookie_header
+            )
+            return {"index": index, "url": url, "status": "ok", "report": report}
+        except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
+            message = str(exc)
+            log(f"任务失败：{message}")
+            return {"index": index, "url": url, "status": "failed", "error": message}
+
+    outer_workers, per_item_workers = split_url_workers(len(options.inputs), options.max_workers)
+    if len(options.inputs) > 1:
+        log(f"批量任务并发：视频 {outer_workers}，单视频分片 {per_item_workers}")
+    results = run_url_batch(options.inputs, outer_workers, per_item_workers, run_one)
+    for result in results:
+        if result.get("status") == "ok":
+            reports.append(result["report"])
+        else:
+            failures.append({"url": result.get("url", ""), "error": result.get("error", "")})
+    return {"output_dir": str(root), "items": reports, "failures": failures}
 
 
 def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
