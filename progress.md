@@ -1,4 +1,93 @@
-# 进度日志：Bilibili 下载功能
+# 进度日志：融合下载器平台扩展
+
+## 会话：2026-07-23
+
+### 阶段 11：项目经历归档、提交与推送
+- **状态：** complete
+- 执行的操作：
+  - 完整读取 `project-retrospective-writer`，并复核 Obsidian 的 `SOUL.md`、`CLAUDE.md`、经历模板和经历索引。
+  - 按项目名、仓库名和核心关键词检索 `学习/经历/`，确认唯一主经历为 `融合下载器从抖音收藏夹工具到多平台高质量下载工作台 2026-04-12.md`。
+  - 更新主经历顶部定位、平台标签、演化主线和阶段结果；追加 YouTube 公开最高质量、Deno/EJS/FFmpeg 独立打包、移除脆弱登录、并行 Range 速度优化和真实验收结果。
+  - 复核 `学习/经历/index.md` 已有正确入口，因此不重复修改索引；未创建或修改 `生活/复盘/`。
+  - 最终运行 31 项自动化测试，全部通过；`pip check`、语法检查和 Git 空白检查均通过。
+  - 审计 11 个待提交文件，未发现真实 Cookie、token、Authorization、密码或测试链接中的私有分享参数；构建产物、下载结果、虚拟环境和平台登录态均未进入提交范围。
+  - 将 YouTube 功能与项目文档提交到 `main` 并推送 `origin/main`；推送后对比本地 HEAD 与远端分支引用，确认完全一致。
+- 创建/修改的文件：
+  - `D:/Homework/Obsidian/学习/经历/融合下载器从抖音收藏夹工具到多平台高质量下载工作台 2026-04-12.md`
+  - `task_plan.md`
+  - `progress.md`
+
+## 会话：2026-07-22
+
+### 阶段 10：YouTube 下载速度诊断与优化
+- **状态：** complete
+- 执行的操作：
+  - 完整读取文件规划技能，恢复三个状态文件并运行 session catchup；确认工作区仍是前序 YouTube 功能的未提交改动，没有覆盖用户文件。
+  - 按关键词检索跨项目经验，仅将“YouTube 4 MiB 分段可稳定完成 4K50”和“CDN Range 需现场验证”作为待验证假设。
+  - 初步代码审计确认：YouTube 固定 4 MiB HTTP 顺序分段；`max_workers` 仅进入 `concurrent_fragment_downloads`，可能无法加速测试链接的普通分离媒体流。
+  - 第一次 32 MiB 单 Range 基准在当前 CDN 节点 45 秒无响应并超时；已停止该大块策略，下一轮改为重新解析后的小 Range 顺序/并行对照，并让每种策略独立报告失败。
+  - 第二轮基准成功：解析 4.551 秒；8 MiB 视频数据用 1 MiB 顺序 Range 仅 0.34 MiB/s，4 路并行为 1.16 MiB/s，8 路并行为 2.38 MiB/s，均为正确 206 Range，当前瓶颈已定位为单连接/顺序传输。
+  - 第三轮块大小基准成功：8 路并行下 2 MiB 块为 4.64 MiB/s，4 MiB 块为 7.08 MiB/s；决定保留 4 MiB 稳定块大小并实现 2/4/8 路有界并行，而不是放大单连接。
+  - 实现 YouTube 普通 HTTP 流有界并行 Range 下载：逐块校验 206、`Content-Range` 和长度，精确预分配文件，限制 8 路与 3 次重试，失败时清理不完整流并重新解析后回退 yt-dlp 稳定分段。
+  - 新增分块覆盖、Cookie 剥离、Range 写入、重试、分轨合并和稳定回退测试；31 项全项目测试、`pip check`、语法检查和 Git 空白检查通过。
+  - 使用测试链接完成 8 路真实 4K50 端到端下载：总耗时 44.132 秒；视频 231.5 MiB、平均 7.55 MiB/s，音频 1.9 MiB、0.51 MiB/s，合并 0.3 秒；最终 244,696,376 字节 MKV，FFprobe 确认 3840×2160/50fps VP9 + AAC。
+  - GUI 速度档位回归通过：stable/balanced/fast 分别返回 2/4/8 路，YouTube 仍仅显示“视频媒体”和公开内容边界说明。
+  - 默认均衡档补充测速通过：4 路下载 16 MiB 用时 4.115 秒，平均 3.89 MiB/s；用户无需手动切快速档也能获得明显提速。
+  - 首次最终打包在覆盖现有 `dist/融合下载器.exe` 时遇到 `WinError 5`；构建分析和归档阶段已完成，当前先检查该精确 EXE 的占用进程，不原样重复构建。
+  - 确认旧版 EXE 由用户窗口占用后未强制终止；先生成并验证并排优化版。用户关闭旧窗口后，以相同 SHA-256 的已验证优化版安全替换标准 `dist/融合下载器.exe`，并清理本轮创建的临时并排副本。
+  - 最终标准 EXE 为 244,045,920 字节，SHA-256 `665A2B6BF07A5BA118F852011C1FF061D8D114DFB899F9476B37A5DCD3BE5FB8`；归档含 YouTube 模块、requests、Deno、EJS、FFmpeg/FFprobe，隐藏启动 12 秒正常。
+  - 按 `experience-summary-writer` 合并更新旧条目“能列出格式不代表最高流可稳定且快速下载”，补充单连接限速、有界并行 Range、逐块验证、稳定回退和真实速度证据，没有新增重复条目。
+
+### 阶段 9：移除 YouTube 登录
+- **状态：** complete
+- 执行的操作：
+  - 按文件规划技能恢复三个状态文件，运行 session catchup，并检查当前 Git 未提交改动。
+  - 查看用户截图，确认 Google 拒绝自动化/调试浏览器登录；公开视频下载能力本身未受影响。
+  - 明确本阶段边界：YouTube 仅支持公开可访问内容，保留公开最高质量、Deno/EJS、4 MiB 分段、FFmpeg 合并和 FFprobe 验证。
+  - 删除 YouTube 浏览器 profile、登录窗口、Cookie 捕获/注入与登录态读取代码；下载函数和统一调度不再接收账号 Cookie。
+  - GUI 移除“登录 YouTube”按钮；切换到 YouTube 时隐藏“检查登录状态”，并显示“仅支持公开内容”的明确说明。
+  - 更新 README、`.gitignore` 和 YouTube 测试，新增无登录 API、公开模式日志及受限内容错误边界检查。
+  - `pip check` 通过；25 项自动化测试、全项目语法检查和 Git 空白检查通过，登录代码关键词扫描仅命中“API 不存在”的反向测试。
+  - 四平台 GUI 回归通过：YouTube 隐藏全部登录/检查按钮，其他三个平台仍只显示各自登录入口；YouTube 状态文案明确公开内容边界。
+  - 对测试链接完成公开模式实时解析：仍选择 `315+140`，即 3840×2160/50fps VP9 + AAC，Deno/EJS 警告为 0；本次不重复下载 244 MB 媒体。
+  - 重新打包成功；首次归档关键词检查因假定 `downloaders.youtube` 会以明文条目出现而提前失败，已记录并改为检查归档实际命名与 PyInstaller TOC，不重复原假设。
+  - 改用 `pyi-archive_viewer -r -b` 递归检查后确认归档包含 `downloaders.youtube`、YouTube extractor、`yt_dlp_ejs`、Deno、FFmpeg 和 FFprobe；新 EXE 为 244,038,713 字节，隐藏启动 12 秒正常。
+  - 按 `experience-summary-writer` 回顾相关旧条目：“YouTube 下载｜能列出格式不代表最高流可稳定下载”和“yt-dlp 登录态｜Cookie 不要放进全局请求头”仍在各自适用边界内有效，无需合并、更新或删除；本轮产品取舍属于项目决策，没有另写跨项目经验。
+  - 最终运行规划完成检查器仍因中文阶段格式报告 `0/0`；人工核对阶段 1-9 均为 complete，无 pending/in_progress，并以测试、实时解析、GUI 和打包证据完成审计。
+
+### 阶段 8：YouTube 最高质量视频下载
+- **状态：** complete（登录部分已由阶段 9 移除）
+- 执行的操作：
+  - 完整读取文件规划技能并恢复 `task_plan.md`、`findings.md`、`progress.md`。
+  - 检查项目规则、Git 状态与现有 Bilibili、调度、GUI、README 和测试集成点；工作区初始为干净状态。
+  - 将 YouTube 新目标作为阶段 8 合并到现有规划体系，没有创建第二套 memory bank。
+  - 对测试链接完成未登录元数据探测：最高格式为 4K/50fps VP9 + AAC，但收到“缺少受支持 JavaScript 运行时、部分格式可能缺失”的弃用警告。
+  - 核对 yt-dlp 官方 EJS 指南与本机环境：当前只有 Node 24.13.0，目标机不能依赖系统 Node；需要把运行时与 `yt-dlp-ejs` 纳入打包方案。
+  - 安装并验证 `yt-dlp[default,deno]`：Deno 2.9.3 与 `yt-dlp-ejs 0.8.0` 正常工作；测试链接解析为 4K50 VP9 + AAC，且不再产生 JavaScript 运行时警告。
+  - 用最低质量完成一次系统临时目录下载实验，确认合并后路径可由 `requested_downloads[].filepath` 获取，临时成品随目录自动清理。
+  - 完成实现方案：独立 `downloaders/youtube.py`、域名受限 CookieJar、Deno/EJS 打包、统一 MKV 无重编码合并、FFprobe 验证、调度与 GUI 媒体平台分支。
+  - 首次真实最高质量下载在视频流阶段返回 `HTTP 403`；元数据、Deno/EJS 和格式选择均成功，已停止原样重试并进入媒体访问上下文诊断。
+  - 检索经验总结未发现可直接套用的 YouTube 403 条目；仅将“先核对签名 URL 请求上下文”作为假设。
+  - 重新解析后验证 4K 视频与最佳音频均可普通 GET/Range 访问；采用已现场验证的 4 MiB HTTP 分段后再做完整下载，不原样重复失败路径。
+  - 第二次真实下载成功：格式 `315+140`，3840×2160/50fps、VP9 + AAC、244,696,376 字节 MKV；FFprobe 内部验证通过，系统临时目录结束后媒体自动清理。
+  - GUI 回归通过：YouTube 仅显示“视频媒体”，仅 YouTube 登录与检查按钮可见，IDM/评论/收藏参数禁用，链接输入保持可用。
+  - 四平台切换回归通过：抖音、小红书、Bilibili 与 YouTube 各自只显示对应登录入口，原平台功能和输入状态未被 YouTube 分支覆盖。
+  - 依赖检查、25 项自动化测试、全项目语法检查和 Git 空白检查全部通过。
+  - 重新生成 244,045,149 字节单文件 EXE；归档确认包含 `downloaders.youtube`、完整 YouTube extractor、`yt_dlp_ejs` 脚本、Deno、FFmpeg 和 FFprobe，隐藏启动 12 秒保持正常。
+  - 规划完成检查器仍因中文阶段格式报告 `0/0`；人工复核阶段 1-8 均为 complete，无 pending/in_progress，以真实下载、测试与打包证据完成审计。
+- 创建/修改的文件：
+  - `downloaders/youtube.py`（创建）
+  - `tests/test_youtube.py`（创建）
+  - `services/task_runner.py`
+  - `app.py`
+  - `requirements.txt`
+  - `build_exe.ps1`
+  - `.gitignore`
+  - `README.md`
+  - `AGENTS.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
 
 ## 会话：2026-07-17
 
@@ -103,6 +192,18 @@
 | 最终 EXE 打包 | 最终源码 | 内置依赖并可独立启动 | 200,286,867 字节；归档与启动检查通过 | 通过 |
 | CookieJar 与日志回归 | 15 项自动化测试 | Cookie 仅作用于 Bilibili、提示去重、真实错误保留 | 15 项全部通过 | 通过 |
 | 修复后真实格式解析 | `BV1oHNv6kEzB` | 最高可用格式不变，弃用警告消失 | 30080+30280；弃用提示 0 条、错误 0 条 | 通过 |
+| YouTube 元数据与 EJS | `EvjZ7ckgYTg` | Deno/EJS 可解析完整格式且无运行时警告 | 31 个格式；最高 315 4K50；警告 0 条 | 通过 |
+| YouTube 自动化测试 | 全项目测试集 | URL、质量、Cookie 域、调度、成品路径均通过 | 25 项全部通过 | 通过 |
+| YouTube 真实最高质量下载 | `EvjZ7ckgYTg` | 账号当前可用最高视频+最佳音频、无重编码合并 | 315+140；3840×2160/50fps/VP9/AAC；244,696,376 字节 MKV | 通过 |
+| YouTube Cookie 域边界 | 合成登录态 | 账号 Cookie 不进入 googlevideo CDN | youtube.com/google.com 可用；googlevideo.com 无 Cookie | 通过 |
+| YouTube GUI 状态 | 切换到 YouTube | 仅视频媒体、显示 YouTube 登录入口、隐藏无关参数 | 状态符合预期 | 通过 |
+| YouTube 最终 EXE 打包 | 最终源码 | 内置 Deno/EJS/yt-dlp/FFmpeg/FFprobe并可启动 | 244,045,149 字节；归档确认、隐藏启动 12 秒正常 | 通过 |
+| YouTube 公开模式实时解析 | `EvjZ7ckgYTg` | 不读取登录态，仍选择公开最高格式 | `315+140`；3840×2160/50fps/VP9/AAC；警告 0 条 | 通过 |
+| YouTube 登录移除回归 | 四平台 GUI + 25 项测试 | YouTube 无登录入口，其他平台登录功能不变 | GUI 断言、测试、语法、依赖与空白检查全部通过 | 通过 |
+| YouTube 公开模式 EXE | 最终源码 | 内置全部运行依赖并可启动 | 244,038,713 字节；递归归档确认、隐藏启动 12 秒正常 | 通过 |
+| YouTube 并行 Range 速度基准 | `EvjZ7ckgYTg` 格式 315 | 找出顺序传输瓶颈并验证有界并行 | 顺序 0.34 MiB/s；均衡 4 路 3.89 MiB/s；快速 8 路完整视频平均 7.55 MiB/s | 通过 |
+| YouTube 优化后完整下载 | `EvjZ7ckgYTg` | 最高质量、音视频完整、失败可回退 | 44.132 秒；315+140；3840×2160/50fps/VP9/AAC；244,696,376 字节 | 通过 |
+| YouTube 速度优化 EXE | 最终源码 | 内置依赖并可独立启动 | 244,045,920 字节；归档确认、隐藏启动 12 秒正常 | 通过 |
 
 ### 阶段 5：Bilibili 登录态与会员最高画质策略
 - **状态：** complete
@@ -150,6 +251,7 @@
 | 2026-07-17 | 4 MiB 配置下视频完成，但 yt-dlp 网络层的音频仍长期为 0 字节 | 1 | 保留解析/选格式能力，改用项目自有 requests Range 下载器获取视频和音频 |
 | 2026-07-17 | 规划阶段状态补丁因上下文变化而两次校验失败 | 2 | 重读三个规划文件后按文件小范围合并，源码未受影响 |
 | 2026-07-17 | 规划技能完成检查器对中文模板报告 0/0 阶段 | 1 | 人工核对 6 个阶段状态和全部验收证据，无未完成阶段 |
+| 2026-07-22 | YouTube 最高视频流下载返回 HTTP 403 | 1 | 验证同格式 GET/Range 后改用 4 MiB HTTP 分段，第二次完整 4K50 下载成功 |
 
 ## 五问重启检查
 | 问题 | 答案 |

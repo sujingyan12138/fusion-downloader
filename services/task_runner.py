@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from downloaders import bilibili, douyin, xiaohongshu
+from downloaders import bilibili, douyin, xiaohongshu, youtube
 from downloaders.douyin_collection import download_collection
 
 
@@ -27,7 +27,9 @@ class TaskOptions:
 
 
 def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
-    if platform == "Bilibili":
+    if platform == "YouTube":
+        urls = youtube.extract_urls(text)
+    elif platform == "Bilibili":
         urls = bilibili.extract_urls(text)
     elif platform == "小红书":
         urls = xiaohongshu.extract_urls(text)
@@ -39,6 +41,8 @@ def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
 
 
 def run_task(options: TaskOptions, log: LogFn) -> dict:
+    if options.platform == "YouTube":
+        return run_youtube_urls(options, log)
     if options.platform == "Bilibili":
         return run_bilibili_urls(options, log)
     if options.platform == "小红书":
@@ -65,6 +69,35 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
             use_idm=options.download_engine,
         )
     return run_douyin_urls(options, log)
+
+
+def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
+    reports = []
+    failures = []
+    root = options.output_root
+    log("YouTube 将下载公开可获取的最高画质；需要登录、年龄验证或私享的视频暂不支持。")
+
+    def run_one(index: int, url: str, per_item_workers: int) -> dict:
+        log(f"\n===== YouTube 任务 {index}/{len(options.inputs)} =====")
+        log(url)
+        try:
+            report = youtube.download_video(url, root, log=log, max_workers=per_item_workers)
+            return {"index": index, "url": url, "status": "ok", "report": report}
+        except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
+            message = str(exc)
+            log(f"任务失败：{message}")
+            return {"index": index, "url": url, "status": "failed", "error": message}
+
+    outer_workers, per_item_workers = split_url_workers(len(options.inputs), options.max_workers)
+    if len(options.inputs) > 1:
+        log(f"批量任务并发：视频 {outer_workers}，单视频分片 {per_item_workers}")
+    results = run_url_batch(options.inputs, outer_workers, per_item_workers, run_one)
+    for result in results:
+        if result.get("status") == "ok":
+            reports.append(result["report"])
+        else:
+            failures.append({"url": result.get("url", ""), "error": result.get("error", "")})
+    return {"output_dir": str(root), "items": reports, "failures": failures}
 
 
 def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:

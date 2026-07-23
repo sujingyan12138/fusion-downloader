@@ -25,6 +25,8 @@
 - 不得记录或提交 Cookie、token、浏览器账号数据、完整敏感请求头或登录态目录内容。
 - 登录 Cookie 只允许发送给对应平台的页面/API 域名；已签名的 CDN 媒体 URL 不得附带账号 Cookie，避免跨域泄露。
 - 修改依赖时同步更新 `requirements.txt`、README 使用说明和 PyInstaller 打包路径；外部工具应在运行前检测并给出明确安装/打包提示。
+- YouTube 解析依赖 `yt-dlp-ejs` 与受支持的 JavaScript 运行时；正式 Windows EXE 必须内置 Deno，不得假定目标电脑已安装 Node/Deno 或允许在线拉取挑战脚本。
+- YouTube 普通 HTTP 大文件可使用有界并行 Range 加速，但必须逐块校验 `Content-Range` 和长度、限制并发与重试，并在源站不支持或签名失效时自动回退到稳定下载路径。
 
 ## 媒体下载验收标准
 

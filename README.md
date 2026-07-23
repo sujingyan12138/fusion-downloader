@@ -1,6 +1,6 @@
 # 融合下载器
 
-Windows 本地 GUI，整合抖音、小红书和 Bilibili 下载能力。
+Windows 本地 GUI，整合抖音、小红书、Bilibili 和 YouTube 下载能力。
 
 ## 功能
 
@@ -11,6 +11,7 @@ Windows 本地 GUI，整合抖音、小红书和 Bilibili 下载能力。
 - 小红书评论区图片：复用小红书浏览器登录态读取评论图片并下载原图候选。
 - 小红书收藏作品/专辑：登录后可下载“全部收藏作品”，也可像抖音收藏夹一样选择“专辑”批量下载；图片、视频、Live Photo 都会保存，已下载过的作品会自动跳过。
 - Bilibili 视频媒体：支持单条或批量视频链接，选择当前访问权限下可用的最高质量视频流与最佳音频流，并通过 FFmpeg 无重编码合并；不下载封面、弹幕、字幕、评论或收藏内容。
+- YouTube 视频媒体：支持普通视频、短链接、Shorts 和直播回放链接；在公开可访问格式中选择最高视频与最佳音频，并通过 FFmpeg 无重编码合并为 MKV。
 - 自动检测 IDM：有 IDM 时用于适合的大文件下载；没有时使用内置并发下载器。
 
 ## 使用
@@ -39,6 +40,8 @@ Windows 本地 GUI，整合抖音、小红书和 Bilibili 下载能力。
 
 Bilibili 高画质通常使用分离的 DASH 视频和音频流，因此运行环境必须能找到 `ffmpeg` 和 `ffprobe`。打包脚本会在构建时自动捆绑本机可用版本。未登录时会下载公开可用的最高质量；如需账号或大会员专属的 4K/高帧率清晰度，请点击 `登录 Bilibili`，在独立窗口登录后软件会复用 `Bilibili浏览器登录态/`。程序不会写死 1080p，而是从当前账号实际可用格式中按分辨率、帧率、码率依次选择最高项。
 
+YouTube 依赖 `yt-dlp-ejs` 和 Deno 处理站点 JavaScript 挑战，正式 EXE 会把它们与 FFmpeg/FFprobe 一起内置，用户无需额外安装。程序会在公开可获取的格式中按分辨率、帧率、码率选择最高项；普通 HTTP 媒体流使用有界并行 Range 下载，“稳定/均衡/快速”分别对应 2/4/8 路连接，失败时自动回退到 yt-dlp 稳定分段。当前不提供 YouTube 登录，年龄限制、私享、会员或其他必须登录才能访问的视频暂不支持。
+
 ## 打包
 
 ```powershell
@@ -57,5 +60,6 @@ dist\融合下载器.exe
 - `downloaders/douyin.py`：抖音作品和评论区下载核心。
 - `downloaders/xiaohongshu.py`：小红书下载核心。
 - `downloaders/bilibili.py`：Bilibili 最高质量视频下载、合并和媒体验证。
+- `downloaders/youtube.py`：YouTube 公开最高质量视频下载、Deno/EJS 解析、合并和媒体验证。
 - `downloaders/douyin_collection.py`：抖音收藏夹列表和批量下载适配。
 - `services/task_runner.py`：统一任务调度。

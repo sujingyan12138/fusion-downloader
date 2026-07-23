@@ -20,10 +20,17 @@ $argsList = @(
 )
 
 $argsList += @("--collect-all", "yt_dlp")
+$argsList += @("--collect-all", "yt_dlp_ejs")
+
+$deno = Join-Path (Split-Path $python -Parent) "deno.exe"
+if (-not (Test-Path -LiteralPath $deno)) {
+    throw "deno.exe was not found in the virtual environment. Packaging stopped because YouTube highest-quality extraction requires a bundled JavaScript runtime."
+}
+$argsList += @("--add-binary", "$deno;.")
 
 $ffmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
 if (-not $ffmpeg) {
-    throw "ffmpeg.exe was not found. Packaging stopped because Bilibili highest-quality downloads require bundled FFmpeg."
+    throw "ffmpeg.exe was not found. Packaging stopped because Bilibili and YouTube highest-quality downloads require bundled FFmpeg."
 }
 $argsList += @("--add-binary", "$($ffmpeg.Source);.")
 
