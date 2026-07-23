@@ -1,5 +1,46 @@
 # 进度日志：融合下载器平台扩展
 
+## 会话：2026-07-23（TikTok 提交）
+
+### 阶段 13：TikTok 功能提交与推送
+- **状态：** complete
+- 执行的操作：
+  - 用户明确授权提交并推送 TikTok 功能。
+  - 复核当前分支为 `main`，远端 `origin/main` 仍为 `eabfa6b`，与本地基线一致，无并发冲突。
+  - 提交前重新运行 43 项自动化测试、`pip check` 和 Git 空白检查，均通过。
+  - 待提交范围为 11 个 TikTok 相关源码、测试、文档和项目状态文件；`build/`、`dist/`、测试媒体和登录态不进入提交。
+  - 暂存区空白与敏感信息扫描通过；创建 TikTok 功能提交并推送 `origin/main`，随后核对本地 HEAD 与远端分支引用一致。
+
+## 会话：2026-07-23（TikTok）
+
+### 阶段 12：TikTok 单作品最高质量视频下载
+- **状态：** complete
+- 执行的操作：
+  - 恢复三个项目状态文件并核对 Git；工作区干净，当前 `main` 为 `eabfa6b`。
+  - 读取当前 GUI、统一调度、YouTube 下载器、打包脚本、依赖和 README，确认 TikTok 应作为独立平台模块接入。
+  - 读取当前 yt-dlp 嵌入与格式选择文档，确认单作品使用 `YoutubeDL`、`bestvideo*+bestaudio/best` 和输出模板。
+  - 使用用户提供的真实链接进行不下载解析：公开访问成功，11 个候选，最高为 1080×1920 H.265 + AAC MP4，带水印候选优先级更低。
+  - 第一次真实下载已生成 1,580,173 字节最高质量文件，但输出路径中的 🙂 无法由 PowerShell GBK 控制台编码，日志回调在成功移动文件后抛错，任务被误报失败。
+  - 同次下载出现 yt-dlp 浏览器模拟目标缺失提示；决定加入 `curl-cffi` 正式依赖与 PyInstaller 收集，而不是把当前链接偶然成功当作所有电脑都稳定。
+  - 修复日志编码边界并增加回归测试；安装 `curl-cffi 0.15.0` 后，真实下载不再出现浏览器模拟目标缺失提示。
+  - 修复后源码真实下载成功：格式 `bytevc1_1080p_542129-1`，1080×1920 HEVC + AAC，23.317 秒，1,580,173 字节，`watermarked=false`；独立 FFprobe 通过。
+  - GUI 隐藏回归确认 TikTok 只保留“视频媒体”和“单个”，批量按钮禁用、登录控件隐藏，多个链接输入也只构建第一个作品任务。
+  - 全项目 43 项自动化测试、`pip check`、语法检查和 Git 空白检查通过。
+  - 重新打包 250,112,193 字节单文件 EXE；清单确认内置 TikTok extractor、curl-cffi、Deno、FFmpeg 和 FFprobe。
+  - 使用系统临时目录中的最终 EXE 副本完成 GUI 端到端真实下载，界面报告成功 1、失败 0；独立 FFprobe 再次确认 1080×1920 HEVC + AAC，临时副本与媒体随后清理。
+- 创建/修改的文件：
+  - `downloaders/tiktok.py`（创建）
+  - `tests/test_tiktok.py`（创建）
+  - `services/task_runner.py`
+  - `app.py`
+  - `requirements.txt`
+  - `build_exe.ps1`
+  - `README.md`
+  - `AGENTS.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
 ## 会话：2026-07-23
 
 ### 阶段 11：项目经历归档、提交与推送

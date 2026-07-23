@@ -1,5 +1,24 @@
 # 发现与决策：融合下载器平台扩展
 
+## TikTok 单作品新增需求（2026-07-23）
+- 首阶段只接入公开单个作品链接，仅下载“视频媒体”；不做主页、收藏、评论、字幕或账号登录。
+- 测试链接：`https://www.tiktok.com/@squidgamenetflix/video/7465383132565409070`。
+- 沿用应用同级 `下载结果/`、Windows 安全文件名、稳定作品 ID、临时目录和 FFprobe 音视频验证。
+
+## TikTok 当前验证与技术决策（2026-07-23）
+- 当前虚拟环境为 `yt-dlp 2026.07.04`；测试链接未登录即可解析，标题 `Smile 🙂 #SquidGame2 #SquidGame`，作者 `squidgamenetflix`，时长 23 秒。
+- 当前返回 11 个格式候选。最高项为 `bytevc1_1080p_542129-1`：1080×1920、H.265 + AAC、MP4、1,580,173 字节；默认解析也选择该格式。
+- `download` 候选被明确标为 `watermarked` 且 preference 为 -2；其余转码候选 preference 为 -1。质量策略以 `bestvideo*+bestaudio/best` 为基础，先过滤 `format_note=watermarked`，再按 `res → fps → br` 排序；只有没有非水印候选时才允许最终 `/best` 回退。
+- 当前链接无需 Cookie 或登录态即可解析；未安装 `curl-cffi` 时虽然能完成本次下载，但 yt-dlp 会提示缺少浏览器模拟目标，因此正式包加入该依赖。私密、区域限制或必须登录的作品暂不宣称支持。
+- TikTok 当前最高候选已经同时含视频和音频，但实现仍保留 FFmpeg 路径以兼容未来分离流，并用 FFprobe 要求最终文件同时包含视频和音频。
+- yt-dlp 当前文档建议嵌入 `YoutubeDL`、使用 `bv*+ba/b` 兼容合并流与分离流，并通过输出模板控制临时文件；`extract_info` 的内部对象不应被假定为普通 JSON。
+- 第一次真实下载虽然拿到正确媒体，但 yt-dlp 明确提示“attempting impersonation, but no impersonate target is available”。因此将 `curl-cffi` 从“暂不需要”修正为正式依赖并纳入 PyInstaller 收集，避免其他网络环境只能依赖未模拟请求。
+- 第一次真实下载的输出文件名包含 🙂；媒体已成功移动，但 PowerShell GBK 控制台在打印路径时抛出 `UnicodeEncodeError`，使任务被误报为失败。日志现在只对无法编码的字符做替换重试，不能让非关键日志破坏已完成下载。
+- 修复后源码真实下载成功，报告为 `bytevc1_1080p_542129-1`、1080×1920、HEVC + AAC、23.317 秒、1,580,173 字节、`watermarked=false`；独立 FFprobe 得到相同音视频轨和尺寸。
+- 最终单文件 EXE 为 250,112,193 字节。PyInstaller Analysis 与归档确认包含 `yt_dlp.extractor.tiktok`、`curl_cffi.requests.impersonate`、`curl_cffi/_wrapper.pyd`、Deno、FFmpeg 和 FFprobe。
+- PyInstaller 的 `urllib3.contrib.emscripten/js` 与 `pycparser.lextab/yacctab` 警告来自非 Windows 条件分支或运行时生成路径；最终 EXE 已实际完成 TikTok 解析、模拟请求、下载和 FFprobe 验证，因此当前不属于阻塞性缺失。
+- 将最终 EXE 复制到系统临时目录后进行 GUI 端到端回归：选择 TikTok 时只保留“视频媒体”和“单个”，批量按钮禁用，登录控件隐藏；粘贴测试链接后显示成功 1、失败 0，产物仍为 1080×1920 HEVC + AAC、1,580,173 字节。临时 EXE、媒体和目录均已清理。
+
 ## YouTube 下载速度优化（2026-07-22）
 - 当前实现把 `max_workers` 只传给 `yt-dlp` 的 `concurrent_fragment_downloads`；测试链接格式 `315` 是普通分离 WebM 流，不一定是 HLS/DASH 分片清单，因此该选项可能无法为单个视频文件建立并行连接。
 - 为规避之前的瞬时 403，当前固定启用 `http_chunk_size=4 MiB`。yt-dlp 的 HTTP 分段主要用于顺序 Range 请求；如果每段请求存在握手/首字节等待，它可能牺牲吞吐量换取稳定性。

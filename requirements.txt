@@ -1,4 +1,4 @@
 requests>=2.32.0
 pillow>=10.4.0
 websocket-client>=1.8.0
-yt-dlp[default,deno]>=2026.7.4
+yt-dlp[default,deno,curl-cffi]>=2026.7.4

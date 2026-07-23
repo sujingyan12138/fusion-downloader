@@ -23,6 +23,7 @@ DOUYIN_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图
 XHS_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图片", "收藏作品")
 BILIBILI_FEATURES = ("视频媒体",)
 YOUTUBE_FEATURES = ("视频媒体",)
+TIKTOK_FEATURES = ("视频媒体",)
 
 
 class UnifiedDownloaderApp(tk.Tk):
@@ -141,7 +142,7 @@ class UnifiedDownloaderApp(tk.Tk):
         header.columnconfigure(0, weight=1)
         header.columnconfigure(1, weight=0)
         ttk.Label(header, text="融合下载器", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="选择来源，粘贴内容，开始下载。支持抖音、小红书、Bilibili 与 YouTube。", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(header, text="选择来源，粘贴内容，开始下载。支持抖音、小红书、Bilibili、YouTube 与 TikTok。", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.open_output_button = ttk.Button(header, text="打开输出文件夹", style="Secondary.TButton", command=self.open_output_dir)
         self.open_output_button.grid(row=0, column=1, rowspan=2, sticky="e")
 
@@ -155,7 +156,7 @@ class UnifiedDownloaderApp(tk.Tk):
         for column in (1, 3, 5):
             selectors.columnconfigure(column, weight=1)
         ttk.Label(selectors, text="平台", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        self.platform_combo = ttk.Combobox(selectors, textvariable=self.platform_var, state="readonly", values=("抖音", "小红书", "Bilibili", "YouTube"), width=12)
+        self.platform_combo = ttk.Combobox(selectors, textvariable=self.platform_var, state="readonly", values=("抖音", "小红书", "Bilibili", "YouTube", "TikTok"), width=12)
         self.platform_combo.grid(row=0, column=1, padx=(8, 18), sticky="ew")
         self.platform_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_platform_change())
 
@@ -404,7 +405,16 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _on_platform_change(self) -> None:
         platform = self.platform_var.get()
-        if platform == "YouTube":
+        if platform == "TikTok":
+            self.feature_combo.configure(values=TIKTOK_FEATURES)
+            self.feature_var.set("视频媒体")
+            self.run_mode_var.set("单个")
+            self.login_douyin_button.grid_remove()
+            self.login_xhs_button.grid_remove()
+            self.login_bilibili_button.grid_remove()
+            self.check_login_button.grid_remove()
+            self.login_status_label.configure(text="TikTok：下载公开单作品最高质量；私密或受限内容暂不支持")
+        elif platform == "YouTube":
             self.feature_combo.configure(values=YOUTUBE_FEATURES)
             self.feature_var.set("视频媒体")
             self.login_douyin_button.grid_remove()
@@ -442,7 +452,8 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _on_feature_change(self) -> None:
         is_xhs = self.platform_var.get() == "小红书"
-        is_media_only = self.platform_var.get() in {"Bilibili", "YouTube"}
+        is_tiktok = self.platform_var.get() == "TikTok"
+        is_media_only = self.platform_var.get() in {"Bilibili", "YouTube", "TikTok"}
         is_collection = self.feature_var.get() in {"收藏夹", "收藏视频", "收藏作品"}
         state = "readonly" if is_collection and not self.is_running else "disabled"
         entry_state = "normal" if is_collection and not is_xhs and not self.is_running else "disabled"
@@ -463,6 +474,11 @@ class UnifiedDownloaderApp(tk.Tk):
         self.engine_combo.configure(state=combo_state)
         self.comment_limit_entry.configure(state=regular_state)
         self.collection_limit_entry.configure(state=regular_state)
+        if is_tiktok:
+            self.run_mode_var.set("单个")
+            self.mode_batch_radio.configure(state="disabled")
+        elif not self.is_running:
+            self.mode_batch_radio.configure(state="normal")
         self._update_detected_count()
 
     def paste_clipboard(self) -> None:

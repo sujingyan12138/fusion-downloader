@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from downloaders import bilibili, douyin, xiaohongshu, youtube
+from downloaders import bilibili, douyin, tiktok, xiaohongshu, youtube
 from downloaders.douyin_collection import download_collection
 
 
@@ -27,7 +27,9 @@ class TaskOptions:
 
 
 def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
-    if platform == "YouTube":
+    if platform == "TikTok":
+        urls = tiktok.extract_urls(text)[:1]
+    elif platform == "YouTube":
         urls = youtube.extract_urls(text)
     elif platform == "Bilibili":
         urls = bilibili.extract_urls(text)
@@ -41,6 +43,8 @@ def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
 
 
 def run_task(options: TaskOptions, log: LogFn) -> dict:
+    if options.platform == "TikTok":
+        return run_tiktok_url(options, log)
     if options.platform == "YouTube":
         return run_youtube_urls(options, log)
     if options.platform == "Bilibili":
@@ -69,6 +73,37 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
             use_idm=options.download_engine,
         )
     return run_douyin_urls(options, log)
+
+
+def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
+    root = options.output_root
+    log("TikTok 将下载公开单作品当前可获取的最高质量；私密、登录或地区受限内容暂不支持。")
+    if not options.inputs:
+        return {
+            "output_dir": str(root),
+            "items": [],
+            "failures": [{"url": "", "error": "没有可执行的 TikTok 单作品链接。"}],
+        }
+
+    url = options.inputs[0]
+    log("\n===== TikTok 单作品任务 =====")
+    log(url)
+    try:
+        report = tiktok.download_video(
+            url,
+            root,
+            log=log,
+            max_workers=options.max_workers,
+        )
+        return {"output_dir": str(root), "items": [report], "failures": []}
+    except Exception as exc:  # noqa: BLE001 - return a GUI-readable failure report.
+        message = str(exc)
+        log(f"任务失败：{message}")
+        return {
+            "output_dir": str(root),
+            "items": [],
+            "failures": [{"url": url, "error": message}],
+        }
 
 
 def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
