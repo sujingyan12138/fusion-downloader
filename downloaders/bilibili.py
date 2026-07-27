@@ -7,16 +7,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from . import douyin
+from . import covers, douyin
 
 
 LogFn = Callable[[str], None]
@@ -28,14 +31,21 @@ _BILIBILI_URL_RE = re.compile(
 )
 _TRAILING_PUNCTUATION = ").,;!?]}>'\"，。；！？）】》」』"
 _RANGE_CHUNK_SIZE = 4 * 1024 * 1024
+_RANGE_RETRIES = 3
+_MAX_RANGE_WORKERS = 8
 BILIBILI_LOGIN_URL = "https://passport.bilibili.com/login"
 BILIBILI_HOME_URL = "https://www.bilibili.com/"
 FORMAT_SELECTOR = "bestvideo+bestaudio/best"
 FORMAT_SORT = ("res", "fps", "br")
+_THREAD_LOCAL = threading.local()
 
 
 class BilibiliDownloadError(RuntimeError):
     """Raised when a Bilibili video cannot be parsed, downloaded, or verified."""
+
+
+class _ParallelDownloadUnavailable(RuntimeError):
+    """Raised when a Bilibili stream should fall back to sequential Range download."""
 
 
 def extract_url(text: str) -> str:
@@ -71,6 +81,7 @@ def download_video(
     log: LogFn | None = None,
     max_workers: int = 4,
     cookie_header: str = "",
+    download_cover: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     url = extract_url(url)
@@ -114,6 +125,12 @@ def download_video(
             shutil.move(str(media_path), str(target))
             report = build_report(info, target, probe)
             report["authenticated"] = bool(cookie_header)
+            if download_cover:
+                try:
+                    report["cover"] = download_cover_from_info(info, output_root, logger)
+                except covers.CoverDownloadError as exc:
+                    report["cover_error"] = str(exc)
+                    logger(f"Bilibili 封面获取失败：{exc}")
             logger(
                 f"Bilibili 下载完成：{report['resolution']}，"
                 f"视频 {report['video_codec']}，音频 {report['audio_codec']}"
@@ -266,20 +283,193 @@ def download_stream(
     logger: LogFn,
     max_workers: int = 4,
 ) -> None:
-    del max_workers  # Reserved for a future bounded parallel range implementation.
     url = str(format_info.get("url") or "")
     if not url.startswith(("http://", "https://")):
         raise BilibiliDownloadError(f"{label}流没有可下载的 HTTP 地址。")
     urls = unique_urls([url, *(format_info.get("_download_urls") or [])])
     headers = media_request_headers(format_info)
-    url = choose_working_url(urls, headers, label, logger)
-    active_url_index = urls.index(url)
-    total = _to_int(format_info.get("filesize")) or _to_int(format_info.get("filesize_approx"))
+    urls, probed_total = choose_working_urls(urls, headers, label, logger)
+    total = probed_total or _to_int(format_info.get("filesize"))
+    workers = max(1, min(_to_int(max_workers) or 1, _MAX_RANGE_WORKERS))
+
+    if workers > 1 and total > 0:
+        try:
+            download_parallel_stream(
+                urls,
+                headers,
+                target,
+                label,
+                total,
+                logger,
+                max_workers=workers,
+            )
+            return
+        except _ParallelDownloadUnavailable as exc:
+            logger(f"{label}流并行下载不可用，自动切换到稳定模式：{exc}")
+
+    download_stream_sequential(urls, headers, target, label, total, logger)
+
+
+def download_parallel_stream(
+    urls: list[str],
+    headers: dict[str, str],
+    target: Path,
+    label: str,
+    total: int,
+    logger: LogFn,
+    max_workers: int = 4,
+) -> None:
+    if not urls or total <= 0:
+        raise _ParallelDownloadUnavailable(f"{label}流缺少可验证的地址或精确大小。")
+    workers = max(1, min(_to_int(max_workers) or 1, _MAX_RANGE_WORKERS))
+    if workers <= 1:
+        raise _ParallelDownloadUnavailable(f"{label}流当前只允许单连接。")
+
+    ranges = build_ranges(total, _RANGE_CHUNK_SIZE)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    with target.open("wb") as output:
+        output.truncate(total)
+
+    logger(f"开始并行下载{label}流：{workers} 路连接，4 MiB 分段。")
+    started = time.monotonic()
+    completed = 0
+    last_percent = -10
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = {
+        executor.submit(
+            _download_range_chunk,
+            urls,
+            headers,
+            start,
+            end,
+            total,
+        ): (start, end)
+        for start, end in ranges
+    }
+    try:
+        with target.open("r+b") as output:
+            for future in as_completed(futures):
+                start, data = future.result()
+                output.seek(start)
+                output.write(data)
+                completed += len(data)
+                percent = min(100, int(completed / total * 100))
+                if percent >= last_percent + 10 or completed >= total:
+                    last_percent = percent
+                    elapsed = max(time.monotonic() - started, 0.001)
+                    speed = completed / 1024 / 1024 / elapsed
+                    logger(f"{label}流下载进度：{percent}%（{speed:.2f} MiB/s）")
+    except Exception as exc:
+        for future in futures:
+            future.cancel()
+        target.unlink(missing_ok=True)
+        if isinstance(exc, _ParallelDownloadUnavailable):
+            raise
+        raise _ParallelDownloadUnavailable(f"{label}流并行分段失败：{exc}") from exc
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    actual = target.stat().st_size if target.is_file() else 0
+    if completed != total or actual != total:
+        target.unlink(missing_ok=True)
+        raise _ParallelDownloadUnavailable(
+            f"{label}流大小校验失败：预期 {total}，实际写入 {completed}，文件 {actual}。"
+        )
+    elapsed = max(time.monotonic() - started, 0.001)
+    logger(
+        f"{label}流下载完成：{total / 1024 / 1024:.1f} MiB，"
+        f"平均 {total / 1024 / 1024 / elapsed:.2f} MiB/s。"
+    )
+
+
+def _download_range_chunk(
+    urls: list[str],
+    headers: dict[str, str],
+    start: int,
+    end: int,
+    total: int,
+) -> tuple[int, bytes]:
+    expected = end - start + 1
+    last_error: Exception | None = None
+    attempts = max(_RANGE_RETRIES + 1, len(urls))
+    for attempt in range(attempts):
+        url = urls[attempt % len(urls)]
+        request_headers = dict(headers)
+        request_headers["Range"] = f"bytes={start}-{end}"
+        try:
+            session = _thread_http_session()
+            with session.get(url, headers=request_headers, stream=True, timeout=(10, 30)) as response:
+                if response.status_code != 206:
+                    raise requests.HTTPError(f"HTTP {response.status_code}", response=response)
+                range_start, range_end, range_total = parse_content_range(
+                    response.headers.get("Content-Range", "")
+                )
+                if range_start != start or range_end != end:
+                    raise requests.ConnectionError(
+                        f"Content-Range 不匹配：预期 {start}-{end}，"
+                        f"实际 {range_start}-{range_end}"
+                    )
+                if range_total not in (0, total):
+                    raise requests.ConnectionError(
+                        f"媒体总大小不一致：预期 {total}，实际 {range_total}"
+                    )
+                data = b"".join(
+                    chunk for chunk in response.iter_content(256 * 1024) if chunk
+                )
+                if len(data) != expected:
+                    raise requests.ConnectionError(
+                        f"分段长度不完整：预期 {expected}，实际 {len(data)}"
+                    )
+                return start, data
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(min(attempt + 1, 3))
+    raise _ParallelDownloadUnavailable(
+        f"Range {start}-{end} 已尝试 {attempts} 次：{last_error}"
+    ) from last_error
+
+
+def _thread_http_session() -> requests.Session:
+    session = getattr(_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=2,
+            pool_maxsize=2,
+            max_retries=0,
+            pool_block=True,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _THREAD_LOCAL.session = session
+    return session
+
+
+def build_ranges(total: int, chunk_size: int = _RANGE_CHUNK_SIZE) -> list[tuple[int, int]]:
+    if total <= 0 or chunk_size <= 0:
+        return []
+    return [
+        (start, min(total - 1, start + chunk_size - 1))
+        for start in range(0, total, chunk_size)
+    ]
+
+
+def download_stream_sequential(
+    urls: list[str],
+    headers: dict[str, str],
+    target: Path,
+    label: str,
+    total: int,
+    logger: LogFn,
+) -> None:
+    active_url_index = 0
     target.parent.mkdir(parents=True, exist_ok=True)
     target.unlink(missing_ok=True)
     position = 0
     last_percent = -10
-    logger(f"开始下载{label}流...")
+    logger(f"开始稳定下载{label}流...")
 
     with requests.Session() as session:
         while total <= 0 or position < total:
@@ -287,7 +477,7 @@ def download_stream(
             if total > 0:
                 requested_end = min(requested_end, total - 1)
             chunk_start = position
-            for attempt in range(1, 5):
+            for attempt in range(1, _RANGE_RETRIES + 2):
                 request_url = urls[(active_url_index + attempt - 1) % len(urls)]
                 request_headers = dict(headers)
                 request_headers["Range"] = f"bytes={chunk_start}-{requested_end}"
@@ -295,6 +485,10 @@ def download_stream(
                     with session.get(request_url, headers=request_headers, stream=True, timeout=(10, 30)) as response:
                         if response.status_code not in (200, 206):
                             raise BilibiliDownloadError(f"{label}流返回 HTTP {response.status_code}。")
+                        if response.status_code == 200 and chunk_start > 0:
+                            raise BilibiliDownloadError(
+                                f"{label}流节点不支持从断点 {chunk_start} 继续下载。"
+                            )
                         range_start, range_end, range_total = parse_content_range(response.headers.get("Content-Range", ""))
                         if response.status_code == 206 and range_start != chunk_start:
                             raise BilibiliDownloadError(
@@ -321,9 +515,14 @@ def download_stream(
                 except (requests.RequestException, BilibiliDownloadError) as exc:
                     with target.open("ab") as output:
                         output.truncate(chunk_start)
-                    if attempt >= 4:
-                        raise BilibiliDownloadError(f"{label}流分段下载失败（已重试 3 次）：{exc}") from exc
-                    logger(f"{label}流连接中断，正在重试 {attempt}/3...")
+                    if attempt > _RANGE_RETRIES:
+                        raise BilibiliDownloadError(
+                            f"{label}流分段下载失败（已重试 {_RANGE_RETRIES} 次）：{exc}"
+                        ) from exc
+                    logger(
+                        f"{label}流连接中断，正在重试 "
+                        f"{attempt}/{_RANGE_RETRIES}..."
+                    )
                     time.sleep(attempt)
             if total > 0:
                 percent = min(100, int(position / total * 100))
@@ -338,26 +537,65 @@ def download_stream(
 
 
 def choose_working_url(urls: list[str], headers: dict[str, str], label: str, logger: LogFn) -> str:
-    successes: list[tuple[float, str]] = []
-    for candidate in urls:
+    ordered, _total = choose_working_urls(urls, headers, label, logger)
+    return ordered[0]
+
+
+def choose_working_urls(
+    urls: list[str],
+    headers: dict[str, str],
+    label: str,
+    logger: LogFn,
+) -> tuple[list[str], int]:
+    if not urls:
+        raise BilibiliDownloadError(f"{label}流没有可用的媒体节点。")
+    successes: list[tuple[float, str, int]] = []
+
+    def probe(candidate: str) -> tuple[float, str, int] | None:
         request_headers = dict(headers)
         request_headers["Range"] = "bytes=0-65535"
         started = time.monotonic()
         try:
-            with requests.get(candidate, headers=request_headers, stream=True, timeout=(5, 15)) as response:
+            with requests.get(
+                candidate,
+                headers=request_headers,
+                stream=True,
+                timeout=(5, 15),
+            ) as response:
                 if response.status_code != 206:
-                    continue
-                received = sum(len(data) for data in response.iter_content(64 * 1024) if data)
-                if received == 65_536:
-                    successes.append((time.monotonic() - started, candidate))
+                    return None
+                range_start, range_end, range_total = parse_content_range(
+                    response.headers.get("Content-Range", "")
+                )
+                if range_start != 0 or range_end < range_start or range_total <= 0:
+                    return None
+                expected = range_end - range_start + 1
+                received = sum(
+                    len(data) for data in response.iter_content(64 * 1024) if data
+                )
+                if received != expected:
+                    return None
+                return time.monotonic() - started, candidate, range_total
         except requests.RequestException:
-            continue
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(len(urls), 4)) as executor:
+        for result in executor.map(probe, urls):
+            if result is not None:
+                successes.append(result)
     if not successes:
         logger(f"{label}流节点预检未返回数据，将由正式下载重试。")
-        return urls[0]
-    elapsed, selected = min(successes, key=lambda item: item[0])
-    logger(f"{label}流节点已就绪，首段响应约 {elapsed:.1f} 秒。")
-    return selected
+        return urls, 0
+
+    successes.sort(key=lambda item: item[0])
+    exact_total = successes[0][2]
+    verified = [url for _elapsed, url, total in successes if total == exact_total]
+    ordered = verified + [url for url in urls if url not in verified]
+    logger(
+        f"{label}流节点已就绪：{len(verified)} 个可用，"
+        f"最快首段约 {successes[0][0]:.1f} 秒。"
+    )
+    return ordered, exact_total
 
 
 def media_request_headers(format_info: dict) -> dict[str, str]:
@@ -505,6 +743,27 @@ def build_report(info: dict, target: Path, probe: dict) -> dict:
         "format_ids": format_ids,
         "download_engine": "yt-dlp + FFmpeg",
     }
+
+
+def download_cover_from_info(
+    info: dict,
+    output_root: str | Path,
+    logger: LogFn | None = None,
+) -> dict:
+    video_id = str(info.get("id") or "")
+    stem = safe_filename(
+        f"Bilibili_{info.get('uploader') or info.get('uploader_id') or '未知作者'}_"
+        f"{info.get('title') or video_id or '未命名视频'}_{video_id}",
+        150,
+    )
+    referer = str(info.get("webpage_url") or info.get("original_url") or BILIBILI_HOME_URL)
+    return covers.download_best_cover(
+        covers.info_cover_candidates(info, source_prefix="bilibili"),
+        output_root,
+        stem,
+        referer=referer,
+        log=logger,
+    )
 
 
 def find_executable(name: str) -> str | None:

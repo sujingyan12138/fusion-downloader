@@ -1,5 +1,90 @@
 # 进度日志：融合下载器平台扩展
 
+## 会话：2026-07-24（Bilibili 下载速度优化）
+
+### 阶段 17：Bilibili 有界并行 Range 下载与速度验证
+- **状态：** complete
+- 执行的操作：
+  - 读取当前 Bilibili、YouTube、统一调度、测试和三个状态文件，确认 Bilibili 与 YouTube 上层质量流程相似，但 Bilibili 的 `max_workers` 尚未作用于单视频传输。
+  - 保留 Bilibili 现有 4 MiB 稳定块和备用 CDN，新增最多 8 路并行 Range、线程本地 Session 连接复用、随机位置写回与完整文件大小校验。
+  - 每个分块验证 HTTP 206、`Content-Range` 起止位置、总大小和实际长度；主节点失败后轮换备用节点，并行不可用时删除不完整流并回退原串行稳定路径。
+  - 串行回退补充防护：非首块收到 HTTP 200 全文件响应时拒绝继续追加，避免把完整文件重复写入造成伪完成品。
+  - 新增 4 项 Bilibili 速度回归测试；19 项 Bilibili 专项测试和全项目 57 项测试全部通过，语法及 Git 空白检查通过。
+  - 第一次真实验证被 1 秒外层工具时限终止；确认无遗留 Python 进程和临时目录后，改用可持续等待单元完成验证，没有机械重复短时限。
+  - 使用系统临时目录真实下载 `BV1oHNv6kEzB`：视频 239.2 MiB/8.97 MiB/s，音频 30.2 MiB/6.88 MiB/s，总耗时 45.383 秒。
+  - 最终成品 283,189,702 字节，格式 `30080+30280`，FFprobe 验证 1920×1080/25fps H.264 + AAC，临时目录自动清理。
+  - 核对并发打包记录：15:41:39 的 EXE 早于 15:44:50 的最终 Bilibili 源码，因此保留其 YouTube 阶段 16 验收记录，但不将其误报为已包含本阶段提速。
+  - 使用正式 `build_exe.bat` 在最终源码之后重新构建，生成 250,157,214 字节单文件 EXE，SHA-256 为 `103C26944FFCB480D066E0DC53F8F6DB8E865537F43AA931A93B3F725E708A9F`。
+  - 归档确认包含 Bilibili/YouTube 下载器与解析器、`requests.adapters`、yt-dlp-ejs、Deno、FFmpeg 和 FFprobe；构建后的 57 项测试再次通过。
+  - 最终 EXE 隐藏启动 12 秒产生两个可响应的单文件进程，均通过正常关闭退出，未使用强制终止，也没有遗留测试进程。
+
+## 会话：2026-07-24（浏览器 Cookie 锁定反馈）
+
+### 阶段 15：Windows 浏览器 Cookie 锁定实机诊断
+- **状态：** complete
+- 执行的操作：
+  - 用户在完全关闭可见 Chrome/Edge 窗口后，Chrome 与 Edge 自动读取仍提示无法复制 Cookie 数据库，并反馈不知道 cookies.txt 从何获得。
+  - 只读检查确认当前仍有 24 个 Chrome 后台进程，其中“独立翻译窗口 - 划词翻译”仍是可见 Chrome 应用；因此 Chrome Cookie 数据库尚未满足无人占用条件。
+  - 当前无 `msedge.exe`，但有 13 个其他应用使用的 `msedgewebview2.exe`；未擅自终止任何浏览器或 WebView2 进程。
+  - 用户选择不终止 Chrome 后台进程，改为学习导出 cookies.txt。
+  - 核对 yt-dlp 官方 FAQ、YouTube extractor 文档和扩展商店，确认使用 `Get cookies.txt LOCALLY`、无痕唯一标签页、`robots.txt` 和 Netscape 格式的安全导出流程。
+  - 用户导出后首次导入提示格式错误；仅检查桌面候选文件名、大小和第一行，确认正确文件为 `www.youtube.com_cookies.txt`，另一个 `cookie.txt` 是 0 字节空文件，未读取或输出任何 Cookie 内容。
+  - 扩展已由用户主动安装并完成本地导出；用户选择正确文件后导入成功，助手未读取或输出 Cookie 内容。
+  - 实机运行日志确认导入模式生效，目标视频解析为 `313+140`、3840×2160/30fps、VP9 + AAC，并开始 4 路、4 MiB 分段下载。
+  - 只读监控发现临时视频流已预分配为 5,036,208,838 字节；虽然文件大小与修改时间不变，但 30 秒内进程继续写入约 159 MiB，确认任务仍在正常并行写入而非停滞。
+  - 用户确认下载完成后复核输出：最终 MKV 为 5,243,020,624 字节，`.youtube-*` 临时目录已清理；独立 FFprobe 确认 3840×2160/29.97fps VP9 视频、AAC 音频和 12,683.366 秒时长。
+
+### 阶段 16：YouTube 新手 Cookie 导出引导与自动导入
+- **状态：** complete
+- 执行的操作：
+  - 用户要求软件面向无相关经验的人自动获取 Cookie 或提供含扩展下载链接的详细教程。
+  - 确定最小安全方案：匿名模式保持默认；将“官方扩展导出教程 + 用户点击后自动查找刚导出的文件”设为推荐路径，Chrome/Edge 数据库直接读取下沉为高级实验方式。
+  - 用户当前仍在下载长视频，已明确允许先修改代码；正式 EXE 打包必须等用户主动确认下载完成后再执行，避免覆盖正在运行且被占用的产物。
+  - 新增软件内 5 步教程：官方扩展商店、yt-dlp 官方说明、无痕唯一标签页、`robots.txt` 地址复制、Netscape + `Export` 提示，以及 Cookie 安全和账号限流风险说明。
+  - 新增桌面/下载目录自动发现：仅检查顶层最近 48 小时 `.txt`，验证文件大小、Netscape 头、YouTube/Google 域和账号 Cookie 名称；选择最新有效文件，保留手动选择备用。
+  - 新增空文件、非 Cookie、游客 Cookie、过期文件和新旧候选选择测试；不在日志或返回状态中输出 Cookie 值。
+  - 隐藏 GUI 回归确认登录设置有 8 个预期按钮，教程有 5 个操作按钮；教程请求尺寸为 812×689，小于当前屏幕 1707×1067。
+  - 首次 GUI 回归因只搜索根窗口直接子控件而未找到嵌套教程窗口，已改为递归遍历控件树后通过；没有修改产品代码规避测试。
+  - 全项目 53 项测试、`pip check`、语法检查和 Git 空白检查全部通过。
+  - 用户确认下载完成并授权关闭关不掉的旧窗口；只对精确匹配 `dist\融合下载器.exe` 的 PID 65160 请求正常关闭，进程已退出，未终止其他软件。
+  - 通过正式 `build_exe.ps1` 生成 250,151,527 字节单文件 EXE，SHA-256 为 `908CCC40A49D1586B0AB99095140B4BEFEE1489BF2AA0C2F3CFE212F3CDDF2A4`。
+  - PyInstaller 归档确认包含 YouTube 下载器、Cookie 加载、YouTube extractor、EJS、Deno、curl-cffi、FFmpeg 和 FFprobe；隐藏启动 12 秒正常，测试进程随后关闭。
+  - 使用 Windows 界面控制对打包后的真实 EXE 做最终回归：切换到 YouTube，打开登录设置和 5 步 Cookie 教程，确认推荐入口、官方链接按钮、`robots.txt` 复制和自动导入入口均可见且布局完整；未点击外部链接、未读取或修改真实 Cookie、未启动下载，最后正常关闭测试窗口。
+  - 最终审计发现 `downloaders/bilibili.py` 与 `tests/test_bilibili.py` 的修改时间为 15:44:50，晚于本轮 EXE 的 15:41:39；这两处 Bilibili 并行下载改动不是本阶段产生，已保留且未回退，也没有重新混入已验证的 YouTube 教程安装包。
+  - 针对出现并发改动后的当前工作区重新运行全量检查：57 项测试、语法与 Git 空白检查仍全部通过；正式 EXE 继续对应 15:41:39 时已经完成验收的 YouTube 教程源码状态。
+
+## 会话：2026-07-24（YouTube 可选登录态）
+
+### 阶段 14：YouTube 可选登录态与反机器人错误分级
+- **状态：** complete
+- 执行的操作：
+  - 完整读取 `planning-with-files-zh` 并手动运行会话恢复脚本；工作区初始干净。
+  - 用当前项目 `yt-dlp 2026.07.04` 对用户链接和此前成功链接做仅解析复现，两者均返回相同 HTTP 429、Visitor Data/PO Token 缺失和机器人确认错误。
+  - 核对 yt-dlp 当前 Cookie、YouTube OAuth 和 PO Token 文档；确认不能恢复被 Google 拒绝的自动化登录窗口。
+  - 选定匿名默认、Firefox 自动读取、cookies.txt 导入备用和独立错误分级的实施方案。
+  - 实现 `YouTube登录态/` 配置、Firefox 正常浏览器入口、Chrome/Edge 现有状态尽力读取、Netscape Cookie 文件过滤导入与清除。
+  - 当前开发机未安装 Firefox；为覆盖本机 Chrome/Edge 用户补充实验性自动读取，但不读取真实用户 Cookie做无人值守测试。
+  - 将 Cookie 通过 yt-dlp 的 `cookiesfrombrowser`/`cookiefile` 接入，不放入全局 Header；登录模式批量解析改为逐个执行。
+  - 完成 22 项 YouTube 聚焦测试、语法与 Git 空白检查；Cookie 文件加载测试只使用合成值，返回状态不泄露 Cookie 内容。
+  - GUI 隐藏回归通过：YouTube 只显示自己的登录设置和检查按钮，设置窗口六个入口完整，匿名状态文案正确。
+  - 使用用户真实链接做只解析回归，没有下载媒体；当前仍为 HTTP 429 + PO Token Visitor Data 缺失 + 机器人确认，友好错误已正确归类并给出登录/网络边界。
+  - 全项目 49 项测试、`pip check`、语法检查和 Git 空白检查通过。
+  - 重新打包成功，最终 EXE 250,143,328 字节，SHA-256 `F7B8DBAE76035C4AE2563FA4FB7AD524999B7E890626A2603DC5DBF11F4A4261`。
+  - PyInstaller 归档确认包含 YouTube 下载器、yt-dlp Cookie 与 YouTube extractor、EJS、Deno、FFmpeg/FFprobe；最终 EXE 隐藏启动 12 秒正常，测试进程随后精确关闭。
+  - 登录态真实有效性需要用户在 GUI 中主动操作；本轮没有擅自读取真实 Chrome/Edge Cookie，也没有创建真实登录态文件。
+  - 规划完成检查器仍因中文阶段格式报告 `0/0`；人工检查 `task_plan.md` 未勾选项为 0，阶段 1–14 均为 complete。
+- 创建/修改的文件：
+  - `.gitignore`
+  - `AGENTS.md`
+  - `README.md`
+  - `app.py`
+  - `downloaders/youtube.py`
+  - `services/task_runner.py`
+  - `tests/test_youtube.py`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
 ## 会话：2026-07-23（TikTok 提交）
 
 ### 阶段 13：TikTok 功能提交与推送
@@ -302,3 +387,29 @@
 | 目标是什么？ | 集成 Bilibili 最高质量视频媒体下载并完成真实链接验证 |
 | 我学到了什么？ | 见 `findings.md` |
 | 我做了什么？ | 见上方会话记录 |
+
+### 阶段 18：全平台可选最高质量作品封面
+- **状态：** complete
+- 已完成：
+  - 检查 `git status`，确认当前 YouTube 登录与 Bilibili 并行下载相关修改尚未提交；本轮在现有工作树上增量修改，不覆盖用户内容。
+  - 重读 `task_plan.md`、`findings.md`、`progress.md`，核对 GUI、`TaskOptions`、统一调度以及五个平台模块。
+  - 确认选项需要覆盖单作品、评论区图片、组合功能、抖音收藏夹、小红书收藏作品和 TikTok 单作品。
+  - 确定按图片实际解码尺寸验证最高质量，并将封面失败与媒体失败分离。
+  - 新增 `downloaders/covers.py`，统一完成候选下载、可解码校验、实际像素择优、已有封面复用和安全命名；五个平台模块只负责提取各自候选。
+  - 在 GUI 增加始终可见的“同时获取最高质量作品封面”复选框，并通过 `TaskOptions` 贯穿单作品、评论、组合与两类收藏调度；任务完成时单独汇总封面警告。
+  - 增加 15 项封面专项测试；全项目 72 项测试全部通过，`compileall` 和 `git diff --check` 通过。
+  - 程序化 GUI 回归确认五个平台切换时复选框始终可见，勾选后构造的 `TaskOptions.download_cover=True`；随后启动源码 GUI，人工确认布局无重叠并实际点击切换成功。
+  - 使用用户提供的五个平台链接执行封面专用真实验证：YouTube 1280×720、Bilibili 1414×900、TikTok 540×960、小红书 2112×2816、抖音 640×360；五张图片均通过双重解码和人工预览。
+  - 关闭本轮源码 GUI 测试进程，并清理脚本、日志和五张测试封面所在的 6 个系统 TEMP 路径；未触碰用户下载内容。
+  - 重新构建 `dist/融合下载器.exe`：250,173,771 字节，时间戳 2026-07-27 10:43:49，SHA-256 `9835710D010E30DB034D7B6C21E434EB09FC75C83F77EBFBEEC19018A0DFAD2A`，晚于相关源码。
+  - 本次构建的 `PYZ-00.toc` 明确包含 `downloaders.covers`、五个平台模块；EXE 同时内置 Deno、FFmpeg 和 FFprobe。
+  - 正式 EXE 启动 8 秒后进程仍响应；随后用户按 Esc 停止 Windows 界面控制，因此未继续点击正式 EXE。此前同一源码 GUI 已完成可见布局和复选框点击验收。
+  - 最终重跑 72 项全项目测试、语法检查和 `git diff --check`，均通过；关闭正式 EXE 测试进程并清理 2 个系统 TEMP 构建日志。
+- 下一步：
+  - 交付正式 EXE；不提交、不推送，保留用户当前未提交工作树。
+- 验收错误：
+  - 首次从系统临时目录启动真实封面脚本时，Python 未自动包含项目根目录，导入 `downloaders` 失败；脚本未进入网络阶段。已改为显式加入项目根目录后重跑。
+  - 独立图片核验的 PowerShell 循环曾直接接管道导致解析失败；改为先赋值 `$rows` 后五张图片均验证通过。
+  - 查询已退出的临时 Chrome 进程时 CIM 两次超时；改用精确 PID、端口和普通进程查询确认已退出。
+  - `Remove-Item` 清理命令被安全策略拒绝两次；逐项验证路径位于系统 TEMP 后用 .NET 文件 API 完成清理并复查为空。
+  - `pyi-archive_viewer -l` 只展示 EXE 外层资源，首次据此搜索新模块未命中；改查当前构建的 `PYZ-00.toc` 后确认模块已打入。

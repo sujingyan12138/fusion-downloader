@@ -20,7 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
-from . import douyin
+from . import covers, douyin
 
 
 LogFn = Callable[[str], None]
@@ -173,6 +173,7 @@ def download_note(
     max_workers: int = 4,
     use_idm: bool | str = "smart",
     video_only: bool = False,
+    download_cover: bool = False,
 ) -> dict:
     """Download original-quality images, videos, and Live Photos from a note.
 
@@ -200,6 +201,7 @@ def download_note(
     author = str(note.get("user", {}).get("nickname") or "未知博主").strip() or "未知博主"
     title = note_title(note, note_id)
     images = extract_images(note)
+    cover_images = list(images)
     note_videos = extract_note_videos(note)
     if note_videos:
         runtime_videos = extract_browser_video_streams(final_url, note, logger)
@@ -241,6 +243,18 @@ def download_note(
         "failures": [],
         "skipped": [],
     }
+    if download_cover:
+        try:
+            report["cover"] = download_cover_from_note(
+                cover_images,
+                note_dir,
+                file_prefix,
+                final_url,
+                logger,
+            )
+        except (XhsDownloadError, covers.CoverDownloadError) as exc:
+            report["cover_error"] = str(exc)
+            logger(f"小红书封面获取失败：{exc}")
     existing_media_names = existing_media_filenames(note_dir)
     if has_existing_note_download(note_dir, note_id, existing_media_names):
         logger(f"已存在下载结果，跳过下载：{note_id}")
@@ -304,6 +318,7 @@ def download_comment_images(
     limit: int | None = None,
     log: LogFn | None = None,
     max_workers: int = 6,
+    download_cover: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     source_url = extract_url(input_text)
@@ -358,6 +373,18 @@ def download_comment_images(
         "browser_engine": str(snapshot.get("browserEngine") or ""),
         "raw_comment_image_candidates": len(raw_images),
     }
+    if download_cover:
+        try:
+            report["cover"] = download_cover_from_note(
+                extract_images(note),
+                note_dir,
+                safe_filename(f"小红书_{author}_{title}_{note_id}", 120),
+                final_url,
+                logger,
+            )
+        except (XhsDownloadError, covers.CoverDownloadError) as exc:
+            report["cover_error"] = str(exc)
+            logger(f"小红书封面获取失败：{exc}")
 
     started_at = time.perf_counter()
     worker_count = max(1, min(max_workers, 10))
@@ -412,10 +439,27 @@ def download_collection(
     log: LogFn | None = None,
     max_workers: int = 4,
     use_idm: bool | str = "smart",
+    download_cover: bool = False,
 ) -> dict:
     if collection_id in {"", "__all__", "__all_videos__", "__all_favorites__"}:
-        return download_favorite_videos(output_root, limit=limit, log=log, max_workers=max_workers, use_idm=use_idm)
-    return download_xhs_collection_notes(collection_id, collection_name, output_root, limit=limit, log=log, max_workers=max_workers, use_idm=use_idm)
+        return download_favorite_videos(
+            output_root,
+            limit=limit,
+            log=log,
+            max_workers=max_workers,
+            use_idm=use_idm,
+            download_cover=download_cover,
+        )
+    return download_xhs_collection_notes(
+        collection_id,
+        collection_name,
+        output_root,
+        limit=limit,
+        log=log,
+        max_workers=max_workers,
+        use_idm=use_idm,
+        download_cover=download_cover,
+    )
 
 
 def download_favorite_videos(
@@ -424,6 +468,7 @@ def download_favorite_videos(
     log: LogFn | None = None,
     max_workers: int = 4,
     use_idm: bool | str = "smart",
+    download_cover: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     if limit is not None and limit <= 0:
@@ -460,6 +505,7 @@ def download_favorite_videos(
         max_workers=max_workers,
         use_idm=use_idm,
         limit=limit,
+        download_cover=download_cover,
     )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -480,6 +526,7 @@ def download_xhs_collection_notes(
     log: LogFn | None = None,
     max_workers: int = 4,
     use_idm: bool | str = "smart",
+    download_cover: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     if limit is not None and limit <= 0:
@@ -517,6 +564,7 @@ def download_xhs_collection_notes(
         max_workers=max_workers,
         use_idm=use_idm,
         limit=limit,
+        download_cover=download_cover,
     )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -538,12 +586,17 @@ def download_xhs_url_collection_items(
     max_workers: int,
     use_idm: bool | str,
     limit: int | None,
+    download_cover: bool = False,
 ) -> None:
     existing_media_names = existing_media_filenames(collection_dir)
     pending: list[tuple[int, str, str]] = []
     for index, url in enumerate(urls, start=1):
         note_id = extract_note_id_from_url(url)
-        if note_id and has_existing_note_download(collection_dir, note_id, existing_media_names):
+        if (
+            not download_cover
+            and note_id
+            and has_existing_note_download(collection_dir, note_id, existing_media_names)
+        ):
             logger(f"已存在，跳过{label} {index}/{len(urls)}：{note_id}")
             report["skipped"].append({"index": index, "note_id": note_id, "url": url, "reason": "exists"})
             continue
@@ -561,7 +614,14 @@ def download_xhs_url_collection_items(
         logger(f"\n----- {label} {index}/{len(urls)} -----")
         logger(url)
         try:
-            item_report = download_note(url, collection_dir, log=logger, max_workers=per_item_workers, use_idm=use_idm)
+            item_report = download_note(
+                url,
+                collection_dir,
+                log=logger,
+                max_workers=per_item_workers,
+                use_idm=use_idm,
+                download_cover=download_cover,
+            )
             return {"kind": "item", "item": {"index": index, "note_id": note_id, "url": url, "status": "ok", "report": item_report}}
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.
             message = str(exc)
@@ -1685,6 +1745,35 @@ def extract_images(note: dict) -> list[ImageItem]:
             )
         )
     return images
+
+
+def download_cover_from_note(
+    images: list[ImageItem],
+    output_root: str | Path,
+    stem: str,
+    referer: str,
+    logger: LogFn | None = None,
+) -> dict:
+    existing = covers.existing_cover_report(output_root, stem)
+    if existing:
+        if logger:
+            logger(f"封面已存在，跳过重复下载：{existing['path']}")
+        return existing
+    if not images:
+        raise XhsDownloadError("笔记数据里没有可用封面或首图。")
+    best = choose_best_image(make_session(), images[0], referer)
+    return covers.save_cover_bytes(
+        output_root,
+        stem,
+        best.content,
+        width=best.width,
+        height=best.height,
+        extension=best.extension,
+        image_format=best.image_format,
+        source=best.candidate.source,
+        url=best.candidate.url,
+        log=logger,
+    )
 
 
 def extract_note_videos(note: dict) -> list[dict]:

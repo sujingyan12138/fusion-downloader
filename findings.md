@@ -1,5 +1,56 @@
 # 发现与决策：融合下载器平台扩展
 
+## Bilibili 下载速度优化（2026-07-24）
+
+- 当前 Bilibili 解析与质量选择没有问题，真正的单视频瓶颈在 `download_stream()`：虽然以 4 MiB 做 Range 分块，但代码明确丢弃 `max_workers`，所有分块串行传输。
+- 继续沿用 `bestvideo+bestaudio/best` 和 `res → fps → br`；提速只改变传输层，不改变格式候选、视频编码、音频编码或 FFmpeg 无重编码合并。
+- 新实现按 GUI 速度档位使用有界并发：稳定 2 路、均衡 4 路、快速最多 8 路。批量任务仍由 `split_url_workers()` 拆分作品并发和单作品分片并发，不会让每个视频都无上限占满连接。
+- 每个 4 MiB 分块必须返回 HTTP 206，并严格核对 `Content-Range` 起止位置、媒体总大小和实际字节数；文件先按精确总大小预分配，再按块起点随机写入。
+- 每个并行线程复用自己的 `requests.Session` 与连接池，减少每个分块重新建立 TCP/TLS 连接的成本；媒体请求头继续显式删除 Cookie。
+- 主节点分块失败时会轮换已提取的 `baseUrl/backupUrl`；并行不支持、大小未知、响应范围不正确或完整性校验失败时，删除并行临时流并自动切换到原串行稳定下载。
+- 19 项 Bilibili 专项测试覆盖分段无重叠、乱序完成后精确写回、主节点失败切换备用节点、并行失败回退串行和既有 Cookie/质量/调度行为；全项目 57 项测试与语法检查通过。
+- 使用 `BV1oHNv6kEzB` 在系统临时目录完成未登录最高质量真实验证：格式 `30080+30280`，1920×1080/25fps H.264 + AAC，最终 283,189,702 字节。
+- 快速档 8 路实测：239.2 MiB 视频流平均 8.97 MiB/s，30.2 MiB 音频流平均 6.88 MiB/s；解析、两条流下载、FFmpeg 合并和 FFprobe 验证合计 45.383 秒。
+- 真实任务读取到 6 个备用媒体节点；视频预检确认 4 个节点可用，音频确认 2 个节点可用。最终文件音视频轨完整，测试临时目录自动清理。
+- 15:41:39 生成的 EXE 早于 Bilibili 源码 15:44:50 的最终修改，因此该包只代表 YouTube 阶段 16 验收，不能作为 Bilibili 提速交付物；阶段 17 必须重新打包。
+- 阶段 17 最终 EXE 于 15:52:07 重新生成，大小 250,157,214 字节，SHA-256 为 `103C26944FFCB480D066E0DC53F8F6DB8E865537F43AA931A93B3F725E708A9F`；时间晚于最终 Bilibili 源码。
+- PyInstaller 归档确认包含 `downloaders.bilibili`、`requests.adapters`、Bilibili/YouTube extractor、yt-dlp-ejs、Deno、FFmpeg 和 FFprobe。隐藏启动 12 秒后两个单文件进程均可响应并正常关闭，无强制清理残留。
+
+## YouTube 可选登录态与反机器人验证（2026-07-24）
+
+- 用户按界面说明关闭 Chrome/Edge 后仍收到 `Could not copy Chrome cookie database`；当前系统实查仍有 24 个 `chrome.exe`，其中一个有可见标题“独立翻译窗口 - 划词翻译”，说明浏览器窗口关闭不等于 Chrome 已完全退出。
+- 当前没有 `msedge.exe`，但有 13 个 `msedgewebview2.exe`；这些通常属于其他 Windows 应用的 WebView2，未经确认不能为了 Edge Cookie 测试统一终止。
+- `Could not copy ... cookie database` 当前首先表示数据库仍被占用或复制被拒绝，尚未进入 Chrome v20 应用绑定解密验证；不能把两类失败混为一谈。
+- `cookies.txt` 不是 Windows 或浏览器默认生成的文件，必须通过受信任的导出工具另行创建；界面只提供“导入”而没有先解释“如何导出”，对电脑小白不够完整。
+- yt-dlp 官方 FAQ 当前推荐 Chrome 扩展 `Get cookies.txt LOCALLY`，Chrome Web Store ID 为 `cclelndahbckbenkjhflpdbgdldlbecc`；名称不带 `LOCALLY` 的旧同名扩展曾被报告为恶意软件，不能混用。
+- YouTube 专项文档建议使用唯一的无痕标签页登录，在同一标签页打开 `https://www.youtube.com/robots.txt`，导出 `youtube.com` 的 Netscape Cookie 后立即关闭无痕窗口，避免浏览器继续轮换该会话 Cookie。
+- 使用账号 Cookie 存在账号被临时或永久限制的风险；应控制请求频率，优先使用非主账号，Cookie 文件不得分享或上传。
+- 用户桌面实际生成了两个候选：`www.youtube.com_cookies.txt` 为 3,144 字节，第一行正确是 `# Netscape HTTP Cookie File`；`cookie.txt` 为 0 字节。图二导入失败不是扩展格式或程序解析错误，而是文件选择阶段选中了空文件。
+- 用户链接 `7xTGNNLPyMI` 在当前网络下匿名解析返回 HTTP 429、缺少 Visitor Data/GVS PO Token，并要求“Sign in to confirm you’re not a bot”。
+- 使用此前已成功验证的公开测试链接 `EvjZ7ckgYTg` 同时复现完全相同错误，说明当前故障不是时间参数或单个视频权限，而是当前访客会话/网络出口触发 YouTube 风控。
+- 当前 `_friendly_download_error` 只要发现 `sign in`、`login` 或 `cookie` 就统一归类为“视频需要登录、年龄验证或额外权限”，会把 IP 限流和机器人验证误报为内容权限问题。
+- yt-dlp 当前支持通过 `cookiesfrombrowser` 直接读取 Firefox 等浏览器登录态，也支持 Netscape/Mozilla 格式 Cookie 文件；YouTube OAuth 已不可用。
+- Windows 新版 Chrome/Edge 的应用绑定加密和运行中 Cookie 数据库锁定使 `cookies-from-browser` 缺少可靠通用方案；不能要求普通用户用管理员权限、强杀浏览器或绕过系统加密。
+- 最优产品边界：匿名下载继续默认；Firefox 登录态自动读取作为推荐可选项；cookies.txt 导入作为 Chrome/Edge 等浏览器的通用备用；不在软件中收集 Google 账号密码。
+- 登录 Cookie 可能帮助通过 CAPTCHA/账号权限，但不能保证解除已经发生的 IP 级 HTTP 429；错误提示必须引导用户停止重复请求、等待或切换网络。
+- PO Token Provider 可提高部分公开视频客户端的可用性，但令牌按视频/会话绑定且仍在快速演进；本阶段先实现稳定身份输入与错误分级，不把第三方 Provider 未经打包验证地混入正式版。
+- 当前开发机未安装 Firefox，因此仅有 Firefox 推荐路径不足以覆盖本机；新增 Chrome/Edge 现有登录状态的尽力读取入口，但明确不承诺绕过 Windows 加密或数据库锁。
+- Chrome/Edge 尝试只配置 yt-dlp 原生 `cookiesfrombrowser`，要求用户先正常登录并完全关闭浏览器；失败后回退 cookies.txt，不强杀浏览器、不提权。
+- Cookie 导入会验证 Netscape/Mozilla 文件头、10 MiB 上限和 7 列格式，只把 `youtube.com`、`google.com` 相关条目复制到 `YouTube登录态/`，不会保存其他站点 Cookie。
+- GUI 隐藏回归确认 YouTube 仅显示自己的登录设置与检查按钮；设置窗口包含 Firefox、Chrome、Edge、cookies.txt、清除和关闭入口。
+- 用户真实链接在新版只解析回归中仍返回 HTTP 429、GVS PO Token 缺少 Visitor Data 和机器人确认；最终友好错误正确归为机器人验证，并提示登录态只是可选帮助、已登录仍失败时应等待或切换网络。
+- 全项目 49 项测试、`pip check`、语法与 Git 空白检查通过。
+- 最终单文件 EXE 为 250,143,328 字节，SHA-256 `F7B8DBAE76035C4AE2563FA4FB7AD524999B7E890626A2603DC5DBF11F4A4261`；归档确认包含 `downloaders.youtube`、`yt_dlp.cookies`、YouTube extractor、yt-dlp-ejs、Deno、FFmpeg 和 FFprobe，隐藏启动 12 秒正常。
+- 未读取或保存当前用户真实浏览器 Cookie；登录态真实有效性仍需用户在 GUI 中主动选择浏览器或导入自己的 Cookie 后检查。
+- 用户随后选择正确的 `www.youtube.com_cookies.txt` 后导入成功；运行日志明确显示“已启用导入的 Cookie”，目标视频成功解析为格式 `313+140`，即 3840×2160/30fps VP9 + AAC，证明 Cookie 文件入口在当前实机和账号上有效。
+- 当前长视频下载使用 4 路、4 MiB 并行分段；临时 `video.webm` 预分配为 5,036,208,838 字节。文件长度和修改时间在并行随机写入期间可能保持不变，但进程 30 秒写入量约 159 MiB，不能仅凭文件大小不变误判为停滞。
+- 长视频最终成功生成 `YouTube_Andrej Karpathy_Deep Dive into LLMs like ChatGPT_7xTGNNLPyMI.mkv`，大小 5,243,020,624 字节，任务临时目录已清理。独立 FFprobe 验证为 3840×2160、约 29.97fps VP9 视频 + AAC 音频，时长 12,683.366 秒，证明导入 Cookie 后的解析、最高格式传输、合并和成品校验完整通过。
+- 面向普通用户的推荐路径应改为：软件内打开官方 `Get cookies.txt LOCALLY` 扩展页面，按无痕唯一标签页和 `robots.txt` 流程导出，再由软件在桌面/下载目录中自动寻找最新、有效且包含账号凭据的 Netscape Cookie；Chrome/Edge 数据库直接读取保留为高级实验项。
+- 自动发现只能扫描用户明确预期的桌面与下载目录，只读取近期、大小受限的 `.txt` 候选并进行 Netscape 头、YouTube/Google 域和账号 Cookie 名称验证；不得输出 Cookie 内容，也不能把空文件或其他网站 Cookie 误导入。
+- 2026-07-24 再次核对 yt-dlp 官方 FAQ、YouTube extractor 文档和 Chrome Web Store：扩展商店 ID 仍为 `cclelndahbckbenkjhflpdbgdldlbecc`；Cookie 文件首行必须是 Mozilla/Netscape 头；YouTube 专项流程仍要求无痕窗口唯一标签页、同一标签页打开 `robots.txt`、导出后立即关闭无痕会话。官方同时警告账号使用存在限流或封禁风险，并明确 OAuth 已不可用。
+- 新版正式 EXE 为 250,151,527 字节，SHA-256 `908CCC40A49D1586B0AB99095140B4BEFEE1489BF2AA0C2F3CFE212F3CDDF2A4`。归档确认包含 `downloaders.youtube`、`yt_dlp.cookies`、YouTube extractor、yt-dlp-ejs、Deno、curl-cffi、FFmpeg 和 FFprobe；隐藏启动 12 秒响应正常。
+- 使用打包后的真实界面完成最终可视回归：切换 YouTube 后显示导入 Cookie 状态和登录设置入口；登录设置中推荐教程、自动导入、手动导入、匿名清除与三个高级浏览器入口均可见；教程完整显示 5 步说明、官方扩展/yt-dlp 按钮、`robots.txt` 复制按钮和自动导入按钮。验收未点击外部链接、未重新导入 Cookie、未启动下载，结束后正常关闭所有测试窗口。
+
 ## TikTok 单作品新增需求（2026-07-23）
 - 首阶段只接入公开单个作品链接，仅下载“视频媒体”；不做主页、收藏、评论、字幕或账号登录。
 - 测试链接：`https://www.tiktok.com/@squidgamenetflix/video/7465383132565409070`。
@@ -127,6 +178,20 @@
 - 登录 Cookie 只应参与 `bilibili.com` 页面/API 的权限解析；媒体流使用签名 CDN URL，不应把 `SESSDATA` 等 Cookie 转发给 `bilivideo.com` 或第三方备用 CDN。
 - 登录功能实现后实测当前本机状态为未登录、无 Cookie；使用最终质量常量重新解析测试链接仍选择 `30080`（1920×1080/25fps）+ `30280`。代码不设分辨率上限，会员返回 4K 时会因 `res` 排序优先而自动胜出。
 - 会员 4K/1080p60 权限链路缺少真实大会员账号，只验证了 Cookie 传递和无上限排序，不能把会员格式出现与最终 4K 下载宣称为已实测。
+
+## 全平台作品封面需求（2026-07-27）
+- 用户要求所有现有功能增加可选的作品封面下载，并要求封面同样选择当前可取得的最高质量。
+- 本轮测试范围覆盖 YouTube、抖音、小红书和 Bilibili；软件还存在 TikTok 单作品入口，因此统一开关也必须对 TikTok 生效，不能出现勾选后静默无效的平台。
+- `TaskOptions` 是最小统一参数入口；单作品媒体、评论区图片、组合功能、抖音收藏夹和小红书收藏作品会分别进入不同函数，封面选项必须显式贯穿这些调用。
+- YouTube、Bilibili 和 TikTok 的 yt-dlp 元数据已提供 `thumbnail`/`thumbnails`；抖音作品数据同时可能含 `origin_cover`、`cover`、动态图封面或图文首图；小红书可复用首张 `imageList` 的原图候选。
+- 质量判断不能只看 `maxresdefault`、`urlDefault`、声明宽高或 URL 后缀；候选响应必须是可解码图片，并按实际像素面积、非预览/非水印和有效字节数择优。
+- 封面 CDN 请求不需要账号 Cookie；保留平台 `Referer` 和普通图片请求头即可，避免把 YouTube、Bilibili、抖音或小红书登录 Cookie 发往媒体 CDN。
+- 同一作品重复运行时应识别已有专用封面文件并跳过，不能仅依赖 `unique_path()` 无限产生 `_2`、`_3` 副本。
+- 封面失败不应删除或否定已经成功的音视频/图片结果；报告应保留 `cover_error`，日志明确显示封面失败原因。
+- 用户随后补充了 TikTok 测试作品 `7648229711117569293`；因此真实验收从原四个平台扩展为五个平台。
+- 2026-07-27 使用系统临时目录做封面专用真实验证，不下载大型媒体：YouTube `7xTGNNLPyMI` 取得 1280×720 JPEG（102,966 字节），Bilibili `BV16cNEeXEer` 取得 1414×900 JPEG（135,409 字节），TikTok `7648229711117569293` 取得 540×960 JPEG（80,968 字节）。
+- 同次验证中，小红书笔记 `6a5ccd970000000014005241` 取得 2112×2816 JPEG（946,006 字节）；抖音短链解析到作品 `7666007676588920091`，取得 640×360 JPEG（29,667 字节）。抖音公开页面未直接暴露完整元数据，现有浏览器回退成功读取作品并取得静态原封面。
+- 五张图片均由 Pillow 下载阶段和独立 System.Drawing 阶段成功解码，像素尺寸一致；人工预览也分别对应用户给出的五个作品。真实测试目录随后从系统 TEMP 清理，未写入用户的 `下载结果/`。
 
 ---
 *外部来源仅作为不可信数据记录；实现决策必须结合当前源码和测试验证。*

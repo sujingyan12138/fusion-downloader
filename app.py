@@ -5,10 +5,11 @@ import queue
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from downloaders import bilibili, douyin, xiaohongshu
+from downloaders import bilibili, douyin, xiaohongshu, youtube
 from downloaders.douyin_collection import DouyinCollectionError, list_collections, read_douyin_login_context
 from services.task_runner import TaskOptions, extract_task_inputs, run_task
 
@@ -42,6 +43,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.finished_tasks = 0
         self.success_tasks = 0
         self.failed_tasks = 0
+        self.cover_failed_tasks = 0
 
         self.platform_var = tk.StringVar(value="抖音")
         self.feature_var = tk.StringVar(value="作品媒体")
@@ -52,12 +54,14 @@ class UnifiedDownloaderApp(tk.Tk):
         self.engine_var = tk.StringVar(value="smart")
         self.speed_var = tk.StringVar(value="balanced")
         self.run_mode_var = tk.StringVar(value="单个")
+        self.download_cover_var = tk.BooleanVar(value=False)
         self.mode_manually_selected = False
         self.advanced_visible = tk.BooleanVar(value=False)
         self.log_visible = tk.BooleanVar(value=False)
         self.login_douyin_button: ttk.Button | None = None
         self.login_xhs_button: ttk.Button | None = None
         self.login_bilibili_button: ttk.Button | None = None
+        self.login_youtube_button: ttk.Button | None = None
         self.check_login_button: ttk.Button | None = None
         self.open_output_button: ttk.Button | None = None
         self.paste_button: ttk.Button | None = None
@@ -65,6 +69,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.copy_failure_button: ttk.Button | None = None
         self.copy_all_button: ttk.Button | None = None
         self.clear_log_button: ttk.Button | None = None
+        self.download_cover_check: ttk.Checkbutton | None = None
 
         self._setup_style()
         self._build_ui()
@@ -187,7 +192,12 @@ class UnifiedDownloaderApp(tk.Tk):
         advanced_header = ttk.Frame(input_panel, style="PanelInner.TFrame")
         advanced_header.grid(row=3, column=0, sticky="ew", pady=(14, 0))
         advanced_header.columnconfigure(0, weight=1)
-        ttk.Label(advanced_header, text="普通任务无需调整高级设置", style="Hint.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_cover_check = ttk.Checkbutton(
+            advanced_header,
+            text="同时获取最高质量作品封面",
+            variable=self.download_cover_var,
+        )
+        self.download_cover_check.grid(row=0, column=0, sticky="w")
         self.advanced_button = ttk.Button(advanced_header, text="高级设置 ▾", style="Secondary.TButton", command=self.toggle_advanced)
         self.advanced_button.grid(row=0, column=1, sticky="e")
 
@@ -254,10 +264,17 @@ class UnifiedDownloaderApp(tk.Tk):
         self.login_xhs_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
         self.login_bilibili_button = ttk.Button(controls, text="登录 Bilibili", style="Secondary.TButton", command=self.open_bilibili_login)
         self.login_bilibili_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        self.login_youtube_button = ttk.Button(
+            controls,
+            text="YouTube 登录设置",
+            style="Secondary.TButton",
+            command=self.open_youtube_auth_settings,
+        )
+        self.login_youtube_button.grid(row=0, column=5, sticky="w", padx=(8, 0))
         self.check_login_button = ttk.Button(controls, text="检查登录状态", style="Secondary.TButton", command=self.check_login_status)
-        self.check_login_button.grid(row=0, column=5, sticky="w", padx=(8, 0))
+        self.check_login_button.grid(row=0, column=6, sticky="w", padx=(8, 0))
         self.start_button = ttk.Button(controls, text="开始下载", style="Primary.TButton", command=self.start_from_mode)
-        self.start_button.grid(row=0, column=6, sticky="e", padx=(16, 0))
+        self.start_button.grid(row=0, column=7, sticky="e", padx=(16, 0))
 
         self.status_panel = ttk.Frame(page, style="Panel.TFrame", padding=(24, 18, 24, 18))
         status_panel = self.status_panel
@@ -412,6 +429,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_douyin_button.grid_remove()
             self.login_xhs_button.grid_remove()
             self.login_bilibili_button.grid_remove()
+            self.login_youtube_button.grid_remove()
             self.check_login_button.grid_remove()
             self.login_status_label.configure(text="TikTok：下载公开单作品最高质量；私密或受限内容暂不支持")
         elif platform == "YouTube":
@@ -420,13 +438,28 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_douyin_button.grid_remove()
             self.login_xhs_button.grid_remove()
             self.login_bilibili_button.grid_remove()
-            self.check_login_button.grid_remove()
-            self.login_status_label.configure(text="YouTube：下载公开可获取的最高画质；需要登录的内容暂不支持")
+            self.login_youtube_button.grid()
+            self.check_login_button.grid()
+            auth_context = youtube.read_youtube_auth_context()
+            if auth_context.get("error"):
+                status = "YouTube：登录配置异常，请打开登录设置重新配置"
+            elif auth_context.get("mode") == "firefox":
+                status = "YouTube：已启用 Firefox 登录状态；按当前账号权限选择最高画质"
+            elif auth_context.get("mode") == "chrome":
+                status = "YouTube：尝试读取现有 Chrome 登录状态；失败时请导入 Cookie"
+            elif auth_context.get("mode") == "edge":
+                status = "YouTube：尝试读取现有 Edge 登录状态；失败时请导入 Cookie"
+            elif auth_context.get("mode") == "cookie_file":
+                status = "YouTube：已启用导入的 Cookie；按当前账号权限选择最高画质"
+            else:
+                status = "YouTube：匿名下载公开最高画质；遇到验证时可配置登录状态"
+            self.login_status_label.configure(text=status)
         elif platform == "Bilibili":
             self.feature_combo.configure(values=BILIBILI_FEATURES)
             self.feature_var.set("视频媒体")
             self.login_douyin_button.grid_remove()
             self.login_xhs_button.grid_remove()
+            self.login_youtube_button.grid_remove()
             self.login_bilibili_button.grid()
             self.check_login_button.grid()
             self.login_status_label.configure(text="Bilibili：未登录下载公开最高画质；登录后按账号权限选择最高画质")
@@ -437,6 +470,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_douyin_button.grid_remove()
             self.login_xhs_button.grid()
             self.login_bilibili_button.grid_remove()
+            self.login_youtube_button.grid_remove()
             self.check_login_button.grid()
             self.login_status_label.configure(text="登录状态：需要下载收藏内容时请先登录小红书")
         else:
@@ -446,6 +480,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_douyin_button.grid()
             self.login_xhs_button.grid_remove()
             self.login_bilibili_button.grid_remove()
+            self.login_youtube_button.grid_remove()
             self.check_login_button.grid()
             self.login_status_label.configure(text="登录状态：需要下载收藏内容时请先登录抖音")
         self._on_feature_change()
@@ -570,10 +605,379 @@ class UnifiedDownloaderApp(tk.Tk):
         self._append_log(f"已打开 Bilibili 登录窗口。登录成功后将复用：{profile_dir}\n")
         self.login_status_label.configure(text="登录状态：Bilibili 登录窗口已打开")
 
+    def open_youtube_auth_settings(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("YouTube 登录设置")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.configure(bg="#ffffff")
+        panel = ttk.Frame(dialog, style="PanelInner.TFrame", padding=(24, 22))
+        panel.grid(row=0, column=0, sticky="nsew")
+        panel.columnconfigure(0, weight=1)
+        panel.columnconfigure(1, weight=1)
+        ttk.Label(panel, text="YouTube 登录状态", style="PanelTitle.TLabel").grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky="w",
+        )
+        ttk.Label(
+            panel,
+            text=(
+                "默认匿名下载公开内容。软件不会收集 Google 密码。\n"
+                "遇到机器人验证时，推荐按教程导出 Cookie，再让软件自动查找并导入。"
+            ),
+            style="Muted.TLabel",
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 18))
+
+        def open_external_url(url: str, label: str, parent: tk.Misc) -> None:
+            try:
+                opened = webbrowser.open(url, new=2)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("无法打开链接", f"无法打开{label}：{exc}", parent=parent)
+                return
+            if not opened:
+                messagebox.showwarning(
+                    "未能自动打开",
+                    f"系统没有成功打开{label}。\n请复制以下地址到浏览器：\n{url}",
+                    parent=parent,
+                )
+
+        def finish_cookie_import(context: dict, windows: tuple[tk.Misc, ...]) -> None:
+            for window in windows:
+                try:
+                    if window.winfo_exists():
+                        window.destroy()
+                except tk.TclError:
+                    pass
+            count = int(context.get("cookie_count") or 0)
+            source_name = str(context.get("source_name") or "所选文件")
+            self._append_log(
+                f"已从 {source_name} 导入 YouTube/Google 相关 Cookie {count} 个；"
+                "其他站点 Cookie 未保存。\n"
+            )
+            self.login_status_label.configure(text="YouTube：已导入 Cookie，建议检查登录状态")
+            messagebox.showinfo(
+                "导入成功",
+                f"已导入 {count} 个 YouTube/Google 相关 Cookie。\n"
+                "下一步请点击主界面的“检查登录状态”。",
+                parent=self,
+            )
+
+        def use_firefox() -> None:
+            try:
+                youtube.open_youtube_login_in_firefox()
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("无法打开 Firefox", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+            self._append_log(
+                "已用正常 Firefox 打开 YouTube。请在 Firefox 中完成登录并关闭窗口，"
+                "然后回到软件点击“检查登录状态”。\n"
+            )
+            self.login_status_label.configure(text="YouTube：等待 Firefox 登录完成")
+            messagebox.showinfo(
+                "下一步",
+                "请在 Firefox 中正常登录 YouTube。\n"
+                "完成后关闭 Firefox，再回到软件点击“检查登录状态”。",
+                parent=self,
+            )
+
+        def import_cookie_file() -> None:
+            selected = filedialog.askopenfilename(
+                parent=dialog,
+                title="选择 YouTube cookies.txt",
+                filetypes=(("Cookie 文本文件", "*.txt"), ("所有文件", "*.*")),
+            )
+            if not selected:
+                return
+            try:
+                context = youtube.import_youtube_cookie_file(Path(selected))
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("导入失败", str(exc), parent=dialog)
+                return
+            finish_cookie_import({**context, "source_name": Path(selected).name}, (dialog,))
+
+        def auto_import_cookie_file(parent: tk.Misc, windows: tuple[tk.Misc, ...]) -> None:
+            try:
+                context = youtube.auto_import_latest_youtube_cookie()
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror(
+                    "自动导入失败",
+                    f"{exc}\n\n软件只会检查桌面和下载目录顶层，不会扫描整台电脑。",
+                    parent=parent,
+                )
+                return
+            finish_cookie_import(context, windows)
+
+        def open_cookie_guide() -> None:
+            guide = tk.Toplevel(dialog)
+            guide.title("YouTube Cookie 导出教程")
+            guide.transient(dialog)
+            guide.resizable(False, False)
+            guide.configure(bg="#ffffff")
+            guide_panel = ttk.Frame(guide, style="PanelInner.TFrame", padding=(26, 22))
+            guide_panel.grid(row=0, column=0, sticky="nsew")
+            guide_panel.columnconfigure(0, weight=1)
+            guide_panel.columnconfigure(1, weight=1)
+
+            ttk.Label(
+                guide_panel,
+                text="按这 5 步导出 YouTube Cookie",
+                style="PanelTitle.TLabel",
+            ).grid(row=0, column=0, columnspan=2, sticky="w")
+            ttk.Label(
+                guide_panel,
+                text=(
+                    "Cookie 相当于临时登录钥匙：只保存在自己的电脑，不要发给别人、"
+                    "不要上传网盘或聊天窗口。账号下载存在触发限流的风险，非必要时优先匿名下载。"
+                ),
+                style="Muted.TLabel",
+                justify="left",
+                wraplength=760,
+            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 18))
+
+            def add_step(grid_row: int, number: int, title: str, body: str) -> None:
+                ttk.Label(
+                    guide_panel,
+                    text=f"{number}. {title}",
+                    style="SectionTitle.TLabel",
+                ).grid(row=grid_row, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                ttk.Label(
+                    guide_panel,
+                    text=body,
+                    style="Muted.TLabel",
+                    justify="left",
+                    wraplength=760,
+                ).grid(row=grid_row + 1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+            add_step(
+                2,
+                1,
+                "安装正确的扩展",
+                "点击下方按钮安装“Get cookies.txt LOCALLY”。名称必须带 LOCALLY；"
+                "不要安装旧的同名扩展。安装后在扩展详情中开启“允许在无痕模式下运行”。",
+            )
+            link_row = ttk.Frame(guide_panel, style="PanelInner.TFrame")
+            link_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 2))
+            ttk.Button(
+                link_row,
+                text="打开官方扩展下载页",
+                style="Primary.TButton",
+                command=lambda: open_external_url(
+                    youtube.YOUTUBE_COOKIE_EXTENSION_URL,
+                    "Chrome 扩展商店",
+                    guide,
+                ),
+            ).grid(row=0, column=0, sticky="w")
+            ttk.Button(
+                link_row,
+                text="查看 yt-dlp 官方说明",
+                style="Secondary.TButton",
+                command=lambda: open_external_url(
+                    youtube.YOUTUBE_COOKIE_EXPORT_GUIDE_URL,
+                    "yt-dlp 官方教程",
+                    guide,
+                ),
+            ).grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+            add_step(
+                5,
+                2,
+                "打开无痕窗口并只保留一个标签页",
+                "Chrome/Edge 按 Ctrl+Shift+N，新窗口中只留一个标签页。"
+                "如果看不到扩展图标，请先到扩展管理页允许它在无痕模式运行。",
+            )
+            add_step(
+                7,
+                3,
+                "在这个无痕标签页登录 YouTube",
+                "打开 youtube.com 并正常登录。不要在这个无痕窗口继续浏览其他页面或打开第二个标签页。",
+            )
+            add_step(
+                9,
+                4,
+                "同一标签页打开 robots.txt 并导出",
+                "把下方地址粘贴到刚才同一个标签页。打开扩展后确认 Export Format 为 Netscape，"
+                "点击“Export”，不要点“Export All Cookies”。文件可保存到桌面或下载目录。",
+            )
+            ttk.Button(
+                guide_panel,
+                text="复制 robots.txt 地址",
+                style="Secondary.TButton",
+                command=lambda: (
+                    self._copy_text(youtube.YOUTUBE_ROBOTS_URL),
+                    messagebox.showinfo(
+                        "已复制",
+                        "已复制 robots.txt 地址，请粘贴到刚才同一个无痕标签页。",
+                        parent=guide,
+                    ),
+                ),
+            ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(8, 2))
+            add_step(
+                12,
+                5,
+                "关闭无痕窗口，再回软件自动导入",
+                "导出后立即关闭整个无痕窗口。然后点击下方按钮；软件只检查桌面和下载目录中"
+                "最近 48 小时的 .txt 文件，并只保存 YouTube/Google 相关 Cookie。",
+            )
+
+            action_row = ttk.Frame(guide_panel, style="PanelInner.TFrame")
+            action_row.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+            action_row.columnconfigure(0, weight=1)
+            ttk.Button(
+                action_row,
+                text="自动查找并导入刚导出的 Cookie",
+                style="Primary.TButton",
+                command=lambda: auto_import_cookie_file(guide, (guide, dialog)),
+            ).grid(row=0, column=0, sticky="ew")
+
+            def close_guide() -> None:
+                try:
+                    guide.grab_release()
+                except tk.TclError:
+                    pass
+                guide.destroy()
+                if dialog.winfo_exists():
+                    dialog.grab_set()
+                    dialog.focus_set()
+
+            ttk.Button(
+                action_row,
+                text="暂时关闭教程",
+                style="Secondary.TButton",
+                command=close_guide,
+            ).grid(row=0, column=1, sticky="e", padx=(10, 0))
+            guide.protocol("WM_DELETE_WINDOW", close_guide)
+            dialog.grab_release()
+            guide.grab_set()
+            guide.focus_set()
+
+        def use_existing_browser(browser: str, label: str) -> None:
+            try:
+                youtube.configure_browser_auth(browser)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("设置失败", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+            self._append_log(
+                f"已选择读取现有 {label} 登录状态。请确认该浏览器已登录 YouTube，"
+                "完全关闭浏览器后点击“检查登录状态”。\n"
+            )
+            self.login_status_label.configure(text=f"YouTube：等待读取 {label} 登录状态")
+            messagebox.showinfo(
+                "下一步",
+                f"请先确认日常使用的 {label} 已登录 YouTube，然后完全关闭 {label}。\n"
+                "回到软件点击“检查登录状态”。\n\n"
+                "如果提示无法复制或解密 Cookie，请改用 Firefox 或导入 cookies.txt；"
+                "软件不会强制关闭浏览器，也不会要求管理员权限。",
+                parent=self,
+            )
+
+        def use_anonymous() -> None:
+            if not messagebox.askyesno(
+                "清除 YouTube 登录状态",
+                "将删除软件本地保存的 YouTube Cookie 和登录配置，继续使用匿名模式。是否继续？",
+                parent=dialog,
+            ):
+                return
+            youtube.clear_youtube_auth()
+            dialog.destroy()
+            self._append_log("已清除软件本地 YouTube 登录状态，切换为匿名模式。\n")
+            self.login_status_label.configure(text="YouTube：匿名下载公开最高画质")
+
+        ttk.Button(
+            panel,
+            text="打开 Cookie 导出教程（推荐）",
+            style="Primary.TButton",
+            command=open_cookie_guide,
+        ).grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Button(
+            panel,
+            text="自动查找并导入刚导出的 Cookie",
+            style="Secondary.TButton",
+            command=lambda: auto_import_cookie_file(dialog, (dialog,)),
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            panel,
+            text="手动选择 cookies.txt",
+            style="Secondary.TButton",
+            command=import_cookie_file,
+        ).grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            panel,
+            text="清除并使用匿名模式",
+            style="Secondary.TButton",
+            command=use_anonymous,
+        ).grid(row=4, column=1, sticky="ew", padx=(10, 0), pady=(10, 0))
+        ttk.Separator(panel, orient="horizontal").grid(
+            row=5,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(18, 12),
+        )
+        ttk.Label(
+            panel,
+            text="其他方式（高级，可能受浏览器锁定或 Windows 加密影响）",
+            style="Muted.TLabel",
+        ).grid(row=6, column=0, columnspan=2, sticky="w")
+        ttk.Button(
+            panel,
+            text="使用 Firefox 登录状态",
+            style="Secondary.TButton",
+            command=use_firefox,
+        ).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            panel,
+            text="读取现有 Chrome（实验）",
+            style="Secondary.TButton",
+            command=lambda: use_existing_browser("chrome", "Chrome"),
+        ).grid(row=8, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            panel,
+            text="读取现有 Edge（实验）",
+            style="Secondary.TButton",
+            command=lambda: use_existing_browser("edge", "Edge"),
+        ).grid(row=8, column=1, sticky="ew", padx=(10, 0), pady=(10, 0))
+        ttk.Button(
+            panel,
+            text="关闭",
+            style="Secondary.TButton",
+            command=dialog.destroy,
+        ).grid(row=9, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        dialog.grab_set()
+        dialog.focus_set()
+
     def check_login_status(self) -> None:
+        platform = self.platform_var.get()
+
         def worker() -> None:
             try:
-                if self.platform_var.get() == "Bilibili":
+                if platform == "YouTube":
+                    context = youtube.inspect_youtube_auth_context()
+                    if context.get("error"):
+                        self.log_queue.put(("log", str(context["error"])))
+                        self.log_queue.put(("login_status", "YouTube 登录状态不可用"))
+                    elif context.get("mode") == "anonymous":
+                        self.log_queue.put(("log", "YouTube 当前使用匿名模式，不读取任何账号 Cookie。"))
+                        self.log_queue.put(("login_status", "YouTube 匿名模式"))
+                    elif context.get("account_cookie_found"):
+                        count = int(context.get("cookie_count") or 0)
+                        self.log_queue.put(("log", f"YouTube 登录 Cookie 可读取：相关 Cookie {count} 个。"))
+                        self.log_queue.put(("login_status", "YouTube 登录状态已就绪"))
+                    else:
+                        count = int(context.get("cookie_count") or 0)
+                        self.log_queue.put(
+                            (
+                                "log",
+                                f"YouTube Cookie 可读取 {count} 个，但未检测到账号登录凭据；"
+                                "请确认浏览器已登录或重新导入。",
+                            )
+                        )
+                        self.log_queue.put(("login_status", "YouTube 可能仍是游客状态"))
+                elif platform == "Bilibili":
                     context = bilibili.read_bilibili_login_context()
                     if context.get("vip"):
                         self.log_queue.put(("log", "Bilibili 大会员登录态可用，可自动选择会员最高画质。"))
@@ -584,7 +988,7 @@ class UnifiedDownloaderApp(tk.Tk):
                     else:
                         self.log_queue.put(("log", "Bilibili 当前未登录，只能获取公开最高画质。"))
                         self.log_queue.put(("login_status", "Bilibili 未登录"))
-                elif self.platform_var.get() == "抖音":
+                elif platform == "抖音":
                     context = read_douyin_login_context()
                     cookie_count = len([part for part in str(context.get("cookie") or "").split(";") if part.strip()])
                     if cookie_count and not context.get("loginRequired"):
@@ -654,7 +1058,10 @@ class UnifiedDownloaderApp(tk.Tk):
         self._set_buttons_state("disabled")
         self._reset_stats(total=1 if options.feature in {"收藏夹", "收藏视频", "收藏作品"} else len(options.inputs))
         self.empty_state_label.configure(text="任务运行中，请等待下载完成。")
-        self._append_log(f"开始任务：平台={options.platform}，功能={options.feature}\n")
+        cover_mode = "是" if options.download_cover else "否"
+        self._append_log(
+            f"开始任务：平台={options.platform}，功能={options.feature}，获取最高质量封面={cover_mode}\n"
+        )
         self.worker = threading.Thread(target=self._run_worker, args=(options,), daemon=True)
         self.worker.start()
 
@@ -689,6 +1096,7 @@ class UnifiedDownloaderApp(tk.Tk):
             collection_limit=parse_positive_int(self.collection_limit_var.get(), "收藏作品数量" if platform == "小红书" else "收藏夹作品数量"),
             collection_id=collection_id,
             collection_name=collection_name,
+            download_cover=self.download_cover_var.get(),
         )
 
     def _selected_workers(self) -> int:
@@ -731,9 +1139,20 @@ class UnifiedDownloaderApp(tk.Tk):
                 elif event == "task_success":
                     report = payload if isinstance(payload, dict) else {}
                     failures = report.get("failures") if isinstance(report.get("failures"), list) else []
+                    cover_failures = (
+                        report.get("cover_failures")
+                        if isinstance(report.get("cover_failures"), list)
+                        else []
+                    )
                     self.finished_tasks = self.total_tasks
                     self.success_tasks = max(0, self.total_tasks - len(failures))
                     self.failed_tasks = len(failures)
+                    self.cover_failed_tasks = len(cover_failures)
+                    if cover_failures:
+                        self._append_log(
+                            f"封面获取警告：{len(cover_failures)} 个作品未能保存封面；"
+                            "媒体任务结果不受影响，请查看上方具体错误。\n"
+                        )
                     self._refresh_stats()
                 elif event == "task_failed":
                     self.finished_tasks = self.total_tasks
@@ -742,9 +1161,19 @@ class UnifiedDownloaderApp(tk.Tk):
                     self._refresh_stats()
                 elif event == "all_done":
                     self._set_buttons_state("normal")
-                    self.status_label.configure(text=f"完成：成功 {self.success_tasks}，失败 {self.failed_tasks}")
+                    cover_suffix = (
+                        f"，封面警告 {self.cover_failed_tasks}"
+                        if self.cover_failed_tasks
+                        else ""
+                    )
+                    self.status_label.configure(
+                        text=f"完成：成功 {self.success_tasks}，失败 {self.failed_tasks}{cover_suffix}"
+                    )
                     self.empty_state_label.configure(text="任务完成，可打开输出文件夹或复制日志。")
-                    messagebox.showinfo("完成", f"任务完成：成功 {self.success_tasks}，失败 {self.failed_tasks}")
+                    messagebox.showinfo(
+                        "完成",
+                        f"任务完成：成功 {self.success_tasks}，失败 {self.failed_tasks}{cover_suffix}",
+                    )
         except queue.Empty:
             pass
         self.after(100, self._drain_log_queue)
@@ -759,6 +1188,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.finished_tasks = 0
         self.success_tasks = 0
         self.failed_tasks = 0
+        self.cover_failed_tasks = 0
         self._refresh_stats()
         self.status_label.configure(text="等待任务" if total == 0 else "准备开始")
         self.empty_state_label.configure(text="还没有任务，粘贴链接后点击开始下载。" if total == 0 else "任务已创建，等待执行。")
@@ -781,6 +1211,8 @@ class UnifiedDownloaderApp(tk.Tk):
         self.engine_combo.configure(state=readonly)
         self.speed_combo.configure(state=readonly)
         self.advanced_button.configure(state=state)
+        if self.download_cover_check is not None:
+            self.download_cover_check.configure(state=state)
         self.comment_limit_entry.configure(state=state)
         self.collection_limit_entry.configure(state=state)
         for button in (
@@ -789,6 +1221,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_douyin_button,
             self.login_xhs_button,
             self.login_bilibili_button,
+            self.login_youtube_button,
             self.check_login_button,
         ):
             if button is not None:

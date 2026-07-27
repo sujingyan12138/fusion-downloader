@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -14,7 +15,10 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from yt_dlp import YoutubeDL
+from yt_dlp.cookies import CookieLoadError
 from yt_dlp.utils import DownloadError
+
+from . import covers
 
 LogFn = Callable[[str], None]
 
@@ -23,6 +27,37 @@ FORMAT_SORT = ("res", "fps", "br")
 HTTP_CHUNK_SIZE = 4 * 1024 * 1024
 RANGE_RETRIES = 3
 MAX_RANGE_WORKERS = 8
+YOUTUBE_AUTH_DIR_NAME = "YouTube登录态"
+YOUTUBE_AUTH_CONFIG_NAME = "config.json"
+YOUTUBE_COOKIE_FILE_NAME = "youtube_cookies.txt"
+YOUTUBE_COOKIE_EXTENSION_URL = (
+    "https://chromewebstore.google.com/detail/get-cookiestxt-locally/"
+    "cclelndahbckbenkjhflpdbgdldlbecc"
+)
+YOUTUBE_COOKIE_FAQ_URL = (
+    "https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+)
+YOUTUBE_COOKIE_EXPORT_GUIDE_URL = (
+    "https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
+)
+YOUTUBE_ROBOTS_URL = "https://www.youtube.com/robots.txt"
+YOUTUBE_COOKIE_MAX_BYTES = 10 * 1024 * 1024
+YOUTUBE_COOKIE_SEARCH_MAX_AGE_SECONDS = 48 * 60 * 60
+YOUTUBE_BROWSER_AUTH_MODES = {"firefox", "chrome", "edge"}
+YOUTUBE_AUTH_MODES = {"anonymous", "cookie_file", *YOUTUBE_BROWSER_AUTH_MODES}
+YOUTUBE_COOKIE_DOMAINS = ("youtube.com", "google.com")
+YOUTUBE_ACCOUNT_COOKIE_NAMES = {
+    "APISID",
+    "HSID",
+    "LOGIN_INFO",
+    "SAPISID",
+    "SID",
+    "SSID",
+    "__Secure-1PAPISID",
+    "__Secure-1PSID",
+    "__Secure-3PAPISID",
+    "__Secure-3PSID",
+}
 _TRAILING_PUNCTUATION = ").,;!?]}>'\"，。；！？）】》」』"
 _YOUTUBE_URL_RE = re.compile(
     r"https?://(?:(?:www|m|music)\.)?youtube\.com/(?:watch\?[^\s<>\"']+|shorts/[A-Za-z0-9_-]{11}[^\s<>\"']*|live/[A-Za-z0-9_-]{11}[^\s<>\"']*)"
@@ -35,6 +70,449 @@ class YouTubeDownloadError(RuntimeError):
 
 class _ParallelDownloadUnavailable(RuntimeError):
     """Raised when the optimized HTTP Range path should fall back to yt-dlp."""
+
+
+def youtube_auth_dir() -> Path:
+    return app_base_dir() / YOUTUBE_AUTH_DIR_NAME
+
+
+def youtube_auth_config_path() -> Path:
+    return youtube_auth_dir() / YOUTUBE_AUTH_CONFIG_NAME
+
+
+def youtube_cookie_file_path() -> Path:
+    return youtube_auth_dir() / YOUTUBE_COOKIE_FILE_NAME
+
+
+def read_youtube_auth_context() -> dict:
+    config_path = youtube_auth_config_path()
+    if not config_path.is_file():
+        return {
+            "mode": "anonymous",
+            "configured": False,
+            "description": "匿名模式",
+        }
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {
+            "mode": "invalid",
+            "configured": False,
+            "description": "登录配置损坏",
+            "error": f"YouTube 登录配置无法读取，请在登录设置中清除后重新配置：{exc}",
+        }
+
+    mode = str(data.get("mode") or "").strip()
+    if mode not in YOUTUBE_AUTH_MODES:
+        return {
+            "mode": "invalid",
+            "configured": False,
+            "description": "登录配置无效",
+            "error": "YouTube 登录配置包含无法识别的模式，请清除后重新配置。",
+        }
+    if mode in YOUTUBE_BROWSER_AUTH_MODES:
+        browser_label = {
+            "firefox": "Firefox",
+            "chrome": "Chrome",
+            "edge": "Edge",
+        }[mode]
+        return {
+            "mode": mode,
+            "configured": True,
+            "description": f"{browser_label} 登录状态",
+        }
+    if mode == "cookie_file":
+        cookie_file = youtube_cookie_file_path()
+        if not cookie_file.is_file():
+            return {
+                "mode": "invalid",
+                "configured": False,
+                "description": "Cookie 文件缺失",
+                "error": "已选择 YouTube Cookie 文件模式，但本地文件不存在，请重新导入。",
+            }
+        return {
+            "mode": mode,
+            "configured": True,
+            "description": "已导入 cookies.txt",
+            "cookie_file": str(cookie_file),
+        }
+    return {
+        "mode": "anonymous",
+        "configured": False,
+        "description": "匿名模式",
+    }
+
+
+def configure_firefox_auth() -> dict:
+    firefox = find_firefox_browser()
+    if not firefox:
+        raise YouTubeDownloadError(
+            "未找到 Firefox。请先安装并在 Firefox 中登录 YouTube，"
+            "或改用“导入 cookies.txt”。"
+        )
+    _write_auth_config("firefox")
+    return {
+        "mode": "firefox",
+        "configured": True,
+        "description": "Firefox 登录状态",
+        "browser_path": firefox,
+    }
+
+
+def configure_browser_auth(browser: str) -> dict:
+    browser = str(browser or "").strip().lower()
+    if browser not in YOUTUBE_BROWSER_AUTH_MODES:
+        raise YouTubeDownloadError("不支持的 YouTube 浏览器登录模式。")
+    if browser == "firefox":
+        return configure_firefox_auth()
+    _write_auth_config(browser)
+    browser_label = "Chrome" if browser == "chrome" else "Edge"
+    return {
+        "mode": browser,
+        "configured": True,
+        "description": f"{browser_label} 登录状态",
+    }
+
+
+def open_youtube_login_in_firefox() -> dict:
+    firefox = find_firefox_browser()
+    if not firefox:
+        raise YouTubeDownloadError(
+            "未找到 Firefox。请先安装并在 Firefox 中登录 YouTube，"
+            "或改用“导入 cookies.txt”。"
+        )
+    try:
+        subprocess.Popen(  # noqa: S603 - explicit locally installed browser path.
+            [firefox, "-new-window", "https://www.youtube.com/"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+    except OSError as exc:
+        raise YouTubeDownloadError(f"无法打开 Firefox：{exc}") from exc
+    _write_auth_config("firefox")
+    return {
+        "mode": "firefox",
+        "configured": True,
+        "description": "Firefox 登录状态",
+        "browser_path": firefox,
+    }
+
+
+def find_firefox_browser() -> str | None:
+    candidates = [
+        shutil.which("firefox.exe" if sys.platform == "win32" else "firefox"),
+        str(Path(os.environ.get("PROGRAMFILES", "")) / "Mozilla Firefox" / "firefox.exe"),
+        str(Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Mozilla Firefox" / "firefox.exe"),
+        str(Path(os.environ.get("LOCALAPPDATA", "")) / "Mozilla Firefox" / "firefox.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate).resolve())
+    return None
+
+
+def import_youtube_cookie_file(source: Path) -> dict:
+    source = Path(source)
+    kept_lines, cookie_names = _read_youtube_cookie_source(source)
+
+    auth_dir = youtube_auth_dir()
+    auth_dir.mkdir(parents=True, exist_ok=True)
+    target = youtube_cookie_file_path()
+    temporary = target.with_suffix(".tmp")
+    try:
+        temporary.write_text(
+            "# Netscape HTTP Cookie File\r\n"
+            "# 仅供融合下载器本机 YouTube 下载使用，请勿分享。\r\n"
+            + "\r\n".join(kept_lines)
+            + "\r\n",
+            encoding="utf-8",
+            newline="",
+        )
+        os.replace(temporary, target)
+        _write_auth_config("cookie_file")
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise YouTubeDownloadError(f"保存 YouTube Cookie 失败：{exc}") from exc
+
+    return {
+        "mode": "cookie_file",
+        "configured": True,
+        "description": "已导入 cookies.txt",
+        "cookie_file": str(target),
+        "cookie_count": len(kept_lines),
+        "account_cookie_found": bool(cookie_names & YOUTUBE_ACCOUNT_COOKIE_NAMES),
+    }
+
+
+def auto_import_latest_youtube_cookie(
+    search_dirs: list[Path] | tuple[Path, ...] | None = None,
+    *,
+    max_age_seconds: int = YOUTUBE_COOKIE_SEARCH_MAX_AGE_SECONDS,
+    now: float | None = None,
+) -> dict:
+    source = find_recent_youtube_cookie_file(
+        search_dirs,
+        max_age_seconds=max_age_seconds,
+        now=now,
+    )
+    context = import_youtube_cookie_file(source)
+    return {
+        **context,
+        "source_path": str(source),
+        "source_name": source.name,
+    }
+
+
+def find_recent_youtube_cookie_file(
+    search_dirs: list[Path] | tuple[Path, ...] | None = None,
+    *,
+    max_age_seconds: int = YOUTUBE_COOKIE_SEARCH_MAX_AGE_SECONDS,
+    now: float | None = None,
+) -> Path:
+    roots = list(search_dirs) if search_dirs is not None else default_youtube_cookie_search_dirs()
+    current_time = time.time() if now is None else float(now)
+    valid_account_files: list[tuple[float, Path]] = []
+    guest_cookie_files = 0
+
+    for root in _unique_existing_directories(roots):
+        try:
+            candidates = list(root.iterdir())
+        except OSError:
+            continue
+        for source in candidates:
+            if source.suffix.lower() != ".txt":
+                continue
+            try:
+                stat = source.stat()
+            except OSError:
+                continue
+            if not source.is_file() or stat.st_size <= 0 or stat.st_size > YOUTUBE_COOKIE_MAX_BYTES:
+                continue
+            if current_time - stat.st_mtime > max(0, int(max_age_seconds)):
+                continue
+            try:
+                _kept_lines, cookie_names = _read_youtube_cookie_source(source)
+            except YouTubeDownloadError:
+                continue
+            if cookie_names & YOUTUBE_ACCOUNT_COOKIE_NAMES:
+                valid_account_files.append((stat.st_mtime, source))
+            else:
+                guest_cookie_files += 1
+
+    if valid_account_files:
+        return max(valid_account_files, key=lambda item: item[0])[1]
+    if guest_cookie_files:
+        raise YouTubeDownloadError(
+            "在桌面或下载目录找到了 YouTube Cookie 文件，但其中没有账号登录凭据。"
+            "请确认无痕窗口已经登录 YouTube，再按教程重新导出；也可以手动选择文件。"
+        )
+    raise YouTubeDownloadError(
+        "没有在桌面或下载目录找到最近 48 小时导出的有效 YouTube Cookie。"
+        "请先按教程导出，保存后再点击自动导入；也可以改用“手动选择 cookies.txt”。"
+    )
+
+
+def default_youtube_cookie_search_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    user_profile = Path(os.environ.get("USERPROFILE") or Path.home())
+    candidates.extend((user_profile / "Desktop", user_profile / "Downloads"))
+
+    one_drive = os.environ.get("OneDrive")
+    if one_drive:
+        candidates.extend((Path(one_drive) / "Desktop", Path(one_drive) / "Downloads"))
+
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                for value_name in (
+                    "Desktop",
+                    "{374DE290-123F-4565-9164-39C4925E467B}",
+                ):
+                    try:
+                        raw_value, _value_type = winreg.QueryValueEx(key, value_name)
+                    except OSError:
+                        continue
+                    if raw_value:
+                        candidates.append(Path(os.path.expandvars(str(raw_value))))
+        except OSError:
+            pass
+
+    return _unique_existing_directories(candidates)
+
+
+def _unique_existing_directories(paths: list[Path] | tuple[Path, ...]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        try:
+            path = Path(raw_path).expanduser()
+            identity = os.path.normcase(str(path.resolve()))
+        except (OSError, RuntimeError):
+            continue
+        if identity in seen or not path.is_dir():
+            continue
+        seen.add(identity)
+        result.append(path)
+    return result
+
+
+def _read_youtube_cookie_source(source: Path) -> tuple[list[str], set[str]]:
+    source = Path(source)
+    if not source.is_file():
+        raise YouTubeDownloadError("选择的 cookies.txt 文件不存在。")
+    try:
+        size = source.stat().st_size
+    except OSError as exc:
+        raise YouTubeDownloadError(f"无法检查 cookies.txt：{exc}") from exc
+    if size <= 0:
+        raise YouTubeDownloadError("选择的 cookies.txt 是空文件，请重新导出。")
+    if size > YOUTUBE_COOKIE_MAX_BYTES:
+        raise YouTubeDownloadError("cookies.txt 超过 10 MiB，已拒绝导入。")
+    try:
+        text = source.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        raise YouTubeDownloadError(f"无法读取 cookies.txt：{exc}") from exc
+
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if first_line not in {"# Netscape HTTP Cookie File", "# HTTP Cookie File"}:
+        raise YouTubeDownloadError(
+            "Cookie 文件不是 Netscape/Mozilla 格式。"
+            "第一行应为“# Netscape HTTP Cookie File”。"
+        )
+
+    kept_lines: list[str] = []
+    cookie_names: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip("\r\n")
+        if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
+            continue
+        data_line = line.removeprefix("#HttpOnly_")
+        parts = data_line.split("\t")
+        if len(parts) != 7:
+            continue
+        domain = parts[0].lstrip(".").lower()
+        if not any(
+            domain == allowed or domain.endswith(f".{allowed}")
+            for allowed in YOUTUBE_COOKIE_DOMAINS
+        ):
+            continue
+        kept_lines.append(line)
+        cookie_names.add(parts[5])
+
+    if not kept_lines:
+        raise YouTubeDownloadError(
+            "Cookie 文件中没有找到 youtube.com 或 google.com 的 Cookie，"
+            "请在已登录 YouTube 的浏览器中重新导出。"
+        )
+    return kept_lines, cookie_names
+
+
+def clear_youtube_auth() -> None:
+    youtube_auth_config_path().unlink(missing_ok=True)
+    youtube_cookie_file_path().unlink(missing_ok=True)
+    auth_dir = youtube_auth_dir()
+    try:
+        auth_dir.rmdir()
+    except OSError:
+        pass
+
+
+def inspect_youtube_auth_context() -> dict:
+    context = read_youtube_auth_context()
+    if context.get("mode") in {"anonymous", "invalid"}:
+        return context
+    try:
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "logger": _YtDlpLogger(lambda _message: None),
+        }
+        options.update(_auth_ydl_options(context))
+        with YoutubeDL(options) as ydl:
+            cookies = [
+                cookie
+                for cookie in ydl.cookiejar
+                if _is_youtube_cookie_domain(str(cookie.domain or ""))
+            ]
+    except (CookieLoadError, DownloadError, OSError, ValueError) as exc:
+        return {
+            **context,
+            "configured": False,
+            "error": _friendly_auth_error(exc, context),
+        }
+    names = {str(cookie.name or "") for cookie in cookies}
+    return {
+        **context,
+        "configured": bool(cookies),
+        "cookie_count": len(cookies),
+        "account_cookie_found": bool(names & YOUTUBE_ACCOUNT_COOKIE_NAMES),
+    }
+
+
+def _write_auth_config(mode: str) -> None:
+    if mode not in YOUTUBE_AUTH_MODES:
+        raise ValueError(f"Unsupported YouTube auth mode: {mode}")
+    auth_dir = youtube_auth_dir()
+    auth_dir.mkdir(parents=True, exist_ok=True)
+    target = youtube_auth_config_path()
+    temporary = target.with_suffix(".tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"mode": mode}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _is_youtube_cookie_domain(domain: str) -> bool:
+    normalized = domain.lstrip(".").lower()
+    return any(
+        normalized == allowed or normalized.endswith(f".{allowed}")
+        for allowed in YOUTUBE_COOKIE_DOMAINS
+    )
+
+
+def _auth_ydl_options(context: dict | None) -> dict:
+    context = context or {"mode": "anonymous"}
+    if context.get("error"):
+        raise YouTubeDownloadError(str(context["error"]))
+    mode = str(context.get("mode") or "anonymous")
+    if mode == "anonymous":
+        return {}
+    if mode in YOUTUBE_BROWSER_AUTH_MODES:
+        return {"cookiesfrombrowser": (mode, None, None, None)}
+    if mode == "cookie_file":
+        cookie_file = str(context.get("cookie_file") or youtube_cookie_file_path())
+        if not Path(cookie_file).is_file():
+            raise YouTubeDownloadError("YouTube Cookie 文件不存在，请重新导入。")
+        return {"cookiefile": cookie_file}
+    raise YouTubeDownloadError("YouTube 登录配置无效，请清除后重新配置。")
+
+
+def _friendly_auth_error(exc: Exception, context: dict) -> str:
+    source = {
+        "firefox": "Firefox 登录状态",
+        "chrome": "Chrome 登录状态",
+        "edge": "Edge 登录状态",
+        "cookie_file": "Cookie 文件",
+    }.get(str(context.get("mode") or ""), "登录状态")
+    browser_help = (
+        "如果使用 Chrome/Edge，请先完全关闭该浏览器再检查；"
+        "若仍失败，说明 Windows 加密不允许直接读取，请改为导入 cookies.txt。"
+        if context.get("mode") in {"chrome", "edge"}
+        else "如果使用 Firefox，请完成登录后关闭 Firefox再检查；"
+    )
+    return (
+        f"无法读取 YouTube {source}：{exc}。"
+        f"{browser_help}也可以切回匿名模式。"
+    )
 
 
 def extract_url(text: str) -> str:
@@ -78,6 +556,8 @@ def download_video(
     output_root: Path,
     log: LogFn | None = None,
     max_workers: int = 4,
+    auth_context: dict | None = None,
+    download_cover: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     url = extract_url(url)
@@ -97,13 +577,22 @@ def download_video(
 
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    auth_context = auth_context or read_youtube_auth_context()
     logger("正在解析 YouTube 公开视频和可用清晰度...")
     progress = _ProgressHook(logger)
 
     try:
         with tempfile.TemporaryDirectory(prefix=".youtube-", dir=output_root) as temp_name:
             temp_dir = Path(temp_name)
-            options = build_ydl_options(temp_dir, ffmpeg, deno, logger, progress, max_workers)
+            options = build_ydl_options(
+                temp_dir,
+                ffmpeg,
+                deno,
+                logger,
+                progress,
+                max_workers,
+                auth_context=auth_context,
+            )
             parse_started = time.monotonic()
             with YoutubeDL(options) as ydl:
                 info = _unwrap_info(ydl.extract_info(url, download=False))
@@ -143,6 +632,13 @@ def download_video(
             shutil.move(str(media_path), str(target))
             report = build_report(info, target, probe)
             report["download_engine"] = transfer_engine
+            report["auth_mode"] = str(auth_context.get("mode") or "anonymous")
+            if download_cover:
+                try:
+                    report["cover"] = download_cover_from_info(info, output_root, logger)
+                except covers.CoverDownloadError as exc:
+                    report["cover_error"] = str(exc)
+                    logger(f"YouTube 封面获取失败：{exc}")
             logger(
                 f"YouTube 下载完成：{report['resolution']}，"
                 f"视频 {report['video_codec']}，音频 {report['audio_codec']}"
@@ -151,7 +647,7 @@ def download_video(
             return report
     except YouTubeDownloadError:
         raise
-    except DownloadError as exc:
+    except (CookieLoadError, DownloadError) as exc:
         raise YouTubeDownloadError(_friendly_download_error(exc)) from exc
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise YouTubeDownloadError(f"YouTube 视频处理失败：{exc}") from exc
@@ -164,8 +660,9 @@ def build_ydl_options(
     logger: LogFn,
     progress: Callable[[dict], None],
     max_workers: int,
+    auth_context: dict | None = None,
 ) -> dict:
-    return {
+    options = {
         "format": FORMAT_SELECTOR,
         "format_sort": list(FORMAT_SORT),
         "noplaylist": True,
@@ -183,6 +680,8 @@ def build_ydl_options(
         "quiet": True,
         "no_warnings": False,
     }
+    options.update(_auth_ydl_options(auth_context))
+    return options
 
 
 def _unwrap_info(info) -> dict:
@@ -503,6 +1002,75 @@ def build_report(info: dict, target: Path, probe: dict) -> dict:
     }
 
 
+def youtube_cover_candidates(info: dict) -> list[covers.CoverCandidate]:
+    video_id = str(info.get("id") or "")
+    extra: list[covers.CoverCandidate] = []
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        extra = [
+            covers.CoverCandidate(
+                f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+                "youtube:maxresdefault",
+                1280,
+                720,
+                100,
+            ),
+            covers.CoverCandidate(
+                f"https://i.ytimg.com/vi_webp/{video_id}/maxresdefault.webp",
+                "youtube:maxresdefault_webp",
+                1280,
+                720,
+                99,
+            ),
+            covers.CoverCandidate(
+                f"https://i.ytimg.com/vi/{video_id}/hq720.jpg",
+                "youtube:hq720",
+                1280,
+                720,
+                90,
+            ),
+            covers.CoverCandidate(
+                f"https://i.ytimg.com/vi/{video_id}/sddefault.jpg",
+                "youtube:sddefault",
+                640,
+                480,
+                80,
+            ),
+            covers.CoverCandidate(
+                f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                "youtube:hqdefault",
+                480,
+                360,
+                70,
+            ),
+        ]
+    return covers.info_cover_candidates(info, source_prefix="youtube", extra=extra)
+
+
+def download_cover_from_info(
+    info: dict,
+    output_root: str | Path,
+    logger: LogFn | None = None,
+) -> dict:
+    video_id = str(info.get("id") or "")
+    stem = safe_filename(
+        f"YouTube_{info.get('uploader') or info.get('channel') or '未知作者'}_"
+        f"{info.get('title') or video_id or '未命名视频'}_{video_id}",
+        150,
+    )
+    referer = str(
+        info.get("webpage_url")
+        or info.get("original_url")
+        or (f"https://www.youtube.com/watch?v={video_id}" if video_id else "")
+    )
+    return covers.download_best_cover(
+        youtube_cover_candidates(info),
+        output_root,
+        stem,
+        referer=referer,
+        log=logger,
+    )
+
+
 def format_description(format_info: dict) -> str:
     width = _to_int(format_info.get("width"))
     height = _to_int(format_info.get("height"))
@@ -559,8 +1127,39 @@ def safe_filename(value: str, limit: int = 180) -> str:
 def _friendly_download_error(exc: Exception) -> str:
     message = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).strip()
     lower = message.lower()
-    if "sign in" in lower or "login" in lower or "cookie" in lower or "age-restricted" in lower:
-        return f"当前视频需要登录、年龄验证或额外账号权限；本软件目前仅支持公开可访问的 YouTube 视频：{message}"
+    if "failed to load cookies" in lower or "could not copy" in lower and "cookie" in lower:
+        return (
+            "YouTube 登录状态读取失败。请先完全关闭所选浏览器再重试；"
+            "如果 Chrome/Edge 仍因 Windows 加密无法读取，请改用 Firefox 或导入 cookies.txt："
+            f"{message}"
+        )
+    if "http error 429" in lower or "too many requests" in lower:
+        return (
+            "YouTube 当前网络/IP触发了临时限流（HTTP 429）。"
+            "请停止重复尝试，关闭代理或 VPN、等待一段时间或切换网络后再试；"
+            f"登录状态也不能保证解除已经发生的 IP 限制：{message}"
+        )
+    if "not a bot" in lower or "confirm you" in lower and "bot" in lower:
+        return (
+            "YouTube 要求确认当前请求不是机器人。"
+            "可在“YouTube 登录设置”中读取现有浏览器登录状态或导入 cookies.txt；"
+            "如果已经使用登录状态仍出现此提示，请停止重复请求并等待或切换网络。"
+            f"原始信息：{message}"
+        )
+    if (
+        "age-restricted" in lower
+        or "confirm your age" in lower
+        or "private video" in lower
+        or "members-only" in lower
+        or "join this channel" in lower
+        or "sign in" in lower
+        or "login" in lower
+    ):
+        return (
+            "当前视频需要账号登录、年龄验证或额外内容权限。"
+            "请配置有效的 YouTube 登录状态；会员或私享内容仍以该账号实际权限为准："
+            f"{message}"
+        )
     return f"YouTube 下载失败：{message}"
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -39,10 +41,167 @@ class YouTubeUrlTests(unittest.TestCase):
 
 
 class YouTubeMediaTests(unittest.TestCase):
-    def test_public_mode_has_no_login_state_api(self) -> None:
-        self.assertFalse(hasattr(youtube, "open_youtube_login_browser"))
-        self.assertFalse(hasattr(youtube, "read_youtube_login_context"))
-        self.assertFalse(hasattr(youtube, "load_youtube_cookies"))
+    @patch("downloaders.youtube.app_base_dir")
+    def test_auth_defaults_to_anonymous_and_can_be_cleared(self, app_base_dir) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            app_base_dir.return_value = Path(temp_name)
+            self.assertEqual(youtube.read_youtube_auth_context()["mode"], "anonymous")
+
+            youtube._write_auth_config("firefox")
+            self.assertEqual(youtube.read_youtube_auth_context()["mode"], "firefox")
+
+            youtube.configure_browser_auth("chrome")
+            self.assertEqual(youtube.read_youtube_auth_context()["mode"], "chrome")
+
+            youtube.clear_youtube_auth()
+            self.assertEqual(youtube.read_youtube_auth_context()["mode"], "anonymous")
+            self.assertFalse(youtube.youtube_auth_dir().exists())
+
+    @patch("downloaders.youtube.app_base_dir")
+    def test_cookie_import_keeps_only_youtube_and_google_domains(self, app_base_dir) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            app_base_dir.return_value = root
+            source = root / "source.txt"
+            source.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\tyoutube-value\n"
+                ".google.com\tTRUE\t/\tTRUE\t2147483647\tSID\tgoogle-value\n"
+                ".example.com\tTRUE\t/\tTRUE\t2147483647\tOTHER\tshould-not-be-saved\n",
+                encoding="utf-8",
+            )
+
+            context = youtube.import_youtube_cookie_file(source)
+            saved = youtube.youtube_cookie_file_path().read_text(encoding="utf-8")
+
+        self.assertEqual(context["mode"], "cookie_file")
+        self.assertEqual(context["cookie_count"], 2)
+        self.assertTrue(context["account_cookie_found"])
+        self.assertIn(".youtube.com", saved)
+        self.assertIn(".google.com", saved)
+        self.assertNotIn("example.com", saved)
+
+    @patch("downloaders.youtube.app_base_dir")
+    def test_cookie_import_rejects_non_netscape_file(self, app_base_dir) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            app_base_dir.return_value = root
+            source = root / "cookies.json"
+            source.write_text('{"cookie": "value"}', encoding="utf-8")
+
+            with self.assertRaisesRegex(youtube.YouTubeDownloadError, "Netscape"):
+                youtube.import_youtube_cookie_file(source)
+
+    @patch("downloaders.youtube.app_base_dir")
+    def test_cookie_import_rejects_empty_file_with_clear_message(self, app_base_dir) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            app_base_dir.return_value = root
+            source = root / "cookie.txt"
+            source.write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(youtube.YouTubeDownloadError, "空文件"):
+                youtube.import_youtube_cookie_file(source)
+
+    @patch("downloaders.youtube.app_base_dir")
+    def test_auto_import_selects_newest_logged_in_youtube_cookie(self, app_base_dir) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            desktop = root / "Desktop"
+            downloads = root / "Downloads"
+            desktop.mkdir()
+            downloads.mkdir()
+            app_base_dir.return_value = root / "app"
+            now = time.time()
+
+            (desktop / "cookie.txt").write_text("", encoding="utf-8")
+            (downloads / "unrelated.txt").write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".example.com\tTRUE\t/\tTRUE\t2147483647\tSID\tunrelated\n",
+                encoding="utf-8",
+            )
+            older = desktop / "youtube-old.txt"
+            older.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\told-private\n",
+                encoding="utf-8",
+            )
+            newest = downloads / "www.youtube.com_cookies.txt"
+            newest.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\tnew-private\n"
+                ".google.com\tTRUE\t/\tTRUE\t2147483647\tSID\tnew-google\n",
+                encoding="utf-8",
+            )
+            os.utime(older, (now - 120, now - 120))
+            os.utime(newest, (now - 10, now - 10))
+
+            context = youtube.auto_import_latest_youtube_cookie(
+                [desktop, downloads],
+                now=now,
+            )
+            saved = youtube.youtube_cookie_file_path().read_text(encoding="utf-8")
+
+        self.assertEqual(context["source_name"], newest.name)
+        self.assertEqual(context["cookie_count"], 2)
+        self.assertTrue(context["account_cookie_found"])
+        self.assertIn("new-private", saved)
+        self.assertNotIn("old-private", saved)
+        self.assertNotIn("unrelated", saved)
+
+    def test_auto_import_rejects_guest_only_or_old_cookie_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            now = time.time()
+            guest = root / "guest.txt"
+            guest.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tPREF\tguest\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(youtube.YouTubeDownloadError, "没有账号登录凭据"):
+                youtube.find_recent_youtube_cookie_file([root], now=now)
+
+            logged_in = root / "old.txt"
+            logged_in.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\told-private\n",
+                encoding="utf-8",
+            )
+            os.utime(logged_in, (now - 49 * 60 * 60, now - 49 * 60 * 60))
+            guest.unlink()
+
+            with self.assertRaisesRegex(youtube.YouTubeDownloadError, "最近 48 小时"):
+                youtube.find_recent_youtube_cookie_file([root], now=now)
+
+    def test_cookie_tutorial_links_use_official_sources(self) -> None:
+        self.assertIn(
+            "cclelndahbckbenkjhflpdbgdldlbecc",
+            youtube.YOUTUBE_COOKIE_EXTENSION_URL,
+        )
+        self.assertTrue(youtube.YOUTUBE_COOKIE_FAQ_URL.startswith("https://github.com/yt-dlp/"))
+        self.assertEqual(youtube.YOUTUBE_ROBOTS_URL, "https://www.youtube.com/robots.txt")
+
+    @patch("downloaders.youtube.app_base_dir")
+    def test_imported_cookie_can_be_loaded_without_exposing_values(self, app_base_dir) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            app_base_dir.return_value = root
+            source = root / "source.txt"
+            source.write_text(
+                "# Netscape HTTP Cookie File\n"
+                ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\tprivate-value\n",
+                encoding="utf-8",
+            )
+            youtube.import_youtube_cookie_file(source)
+
+            context = youtube.inspect_youtube_auth_context()
+
+        self.assertTrue(context["configured"])
+        self.assertEqual(context["cookie_count"], 1)
+        self.assertTrue(context["account_cookie_found"])
+        self.assertNotIn("private-value", str(context))
 
     def test_quality_strategy_is_not_capped_at_1080p(self) -> None:
         self.assertEqual(youtube.FORMAT_SELECTOR, "bestvideo+bestaudio/best")
@@ -63,6 +222,39 @@ class YouTubeMediaTests(unittest.TestCase):
         self.assertEqual(options["merge_output_format"], "mkv")
         self.assertEqual(options["concurrent_fragment_downloads"], 8)
         self.assertEqual(options["http_chunk_size"], 4 * 1024 * 1024)
+        self.assertNotIn("cookiesfrombrowser", options)
+        self.assertNotIn("cookiefile", options)
+
+    def test_build_options_support_firefox_and_cookie_file_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            cookie_file = root / "cookies.txt"
+            cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+            common_args = (
+                root,
+                "C:/tools/ffmpeg.exe",
+                "C:/tools/deno.exe",
+                lambda _message: None,
+                lambda _status: None,
+                4,
+            )
+
+            firefox_options = youtube.build_ydl_options(
+                *common_args,
+                auth_context={"mode": "firefox"},
+            )
+            cookie_options = youtube.build_ydl_options(
+                *common_args,
+                auth_context={"mode": "cookie_file", "cookie_file": str(cookie_file)},
+            )
+            chrome_options = youtube.build_ydl_options(
+                *common_args,
+                auth_context={"mode": "chrome"},
+            )
+
+        self.assertEqual(firefox_options["cookiesfrombrowser"], ("firefox", None, None, None))
+        self.assertEqual(chrome_options["cookiesfrombrowser"], ("chrome", None, None, None))
+        self.assertEqual(cookie_options["cookiefile"], str(cookie_file))
 
     def test_range_builder_covers_file_without_gaps(self) -> None:
         self.assertEqual(youtube.build_ranges(10, 4), [(0, 3), (4, 7), (8, 9)])
@@ -230,14 +422,38 @@ class YouTubeMediaTests(unittest.TestCase):
         self.assertEqual(summary["resolution"], "3840x2160")
         self.assertEqual(summary["fps"], 50.0)
 
-    def test_login_required_error_explains_public_only_boundary(self) -> None:
+    def test_rate_limit_error_is_not_misreported_as_private_video(self) -> None:
+        message = youtube._friendly_download_error(Exception("HTTP Error 429: Too Many Requests"))
+
+        self.assertIn("网络/IP", message)
+        self.assertIn("临时限流", message)
+        self.assertNotIn("私享", message)
+
+    def test_bot_confirmation_suggests_optional_auth(self) -> None:
+        message = youtube._friendly_download_error(Exception("Sign in to confirm you’re not a bot"))
+
+        self.assertIn("不是机器人", message)
+        self.assertIn("YouTube 登录设置", message)
+        self.assertIn("浏览器登录状态", message)
+
+    def test_login_required_error_explains_account_permission_boundary(self) -> None:
         message = youtube._friendly_download_error(Exception("Sign in to confirm your age"))
 
-        self.assertIn("仅支持公开可访问", message)
+        self.assertIn("账号登录", message)
         self.assertIn("年龄验证", message)
 
+    @patch("services.task_runner.youtube.read_youtube_auth_context")
     @patch("services.task_runner.youtube.download_video")
-    def test_task_runner_aggregates_youtube_success_and_failure(self, download_video) -> None:
+    def test_task_runner_aggregates_youtube_success_and_failure(
+        self,
+        download_video,
+        read_auth_context,
+    ) -> None:
+        read_auth_context.return_value = {
+            "mode": "firefox",
+            "configured": True,
+            "description": "Firefox 登录状态",
+        }
         download_video.side_effect = [
             {"video_id": "one", "output_path": "one.mkv"},
             youtube.YouTubeDownloadError("受限"),
@@ -258,10 +474,9 @@ class YouTubeMediaTests(unittest.TestCase):
         self.assertEqual(len(report["items"]), 1)
         self.assertEqual(len(report["failures"]), 1)
         self.assertEqual(report["failures"][0]["error"], "受限")
-        self.assertIn("公开可获取的最高画质", messages[0])
-        self.assertNotIn("登录态", "\n".join(messages))
+        self.assertIn("Firefox 登录状态", messages[0])
         for call in download_video.call_args_list:
-            self.assertNotIn("cookies", call.kwargs)
+            self.assertEqual(call.kwargs["auth_context"]["mode"], "firefox")
 
 
 if __name__ == "__main__":

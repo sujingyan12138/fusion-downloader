@@ -24,6 +24,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
+from . import covers
+
 
 LogFn = Callable[[str], None]
 
@@ -189,6 +191,7 @@ def download_note(
     use_idm: bool | str = "smart",
     cookie_header: str = "",
     fallback_aweme: dict | None = None,
+    download_cover: bool = False,
 ) -> dict:
     if prefer_format != "original":
         raise ValueError('Only prefer_format="original" is supported.')
@@ -269,6 +272,19 @@ def download_note(
         "failures": [],
         "skipped": [],
     }
+    if download_cover:
+        try:
+            report["cover"] = download_cover_from_aweme(
+                aweme,
+                images,
+                note_dir,
+                file_prefix,
+                final_url,
+                logger,
+            )
+        except (DouyinDownloadError, covers.CoverDownloadError) as exc:
+            report["cover_error"] = str(exc)
+            logger(f"抖音封面获取失败：{exc}")
 
     existing_media_names = existing_media_filenames(note_dir)
     if videos and has_existing_aweme_nowm_video(note_dir, aweme_id, existing_media_names):
@@ -335,6 +351,7 @@ def download_comment_images(
     limit: int | None = None,
     log: LogFn | None = None,
     max_workers: int = 6,
+    download_cover: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     source_url = extract_url(input_text)
@@ -412,6 +429,19 @@ def download_comment_images(
         "raw_origin_candidates": raw_origin_count,
         "raw_thumb_candidates": raw_thumb_count,
     }
+    if download_cover:
+        try:
+            report["cover"] = download_cover_from_aweme(
+                aweme or {},
+                extract_images(aweme or {}),
+                note_dir,
+                safe_filename(f"抖音_{author}_{title}_{aweme_id}", 120),
+                final_url,
+                logger,
+            )
+        except (DouyinDownloadError, covers.CoverDownloadError) as exc:
+            report["cover_error"] = str(exc)
+            logger(f"抖音封面获取失败：{exc}")
 
     started_at = time.perf_counter()
     worker_count = max(1, min(max_workers, 10))
@@ -2320,6 +2350,66 @@ def extract_images(aweme: dict) -> list[ImageItem]:
                 )
             )
     return images
+
+
+def download_cover_from_aweme(
+    aweme: dict,
+    images: list[ImageItem],
+    output_root: str | Path,
+    stem: str,
+    referer: str,
+    logger: LogFn | None = None,
+) -> dict:
+    existing = covers.existing_cover_report(output_root, stem)
+    if existing:
+        if logger:
+            logger(f"封面已存在，跳过重复下载：{existing['path']}")
+        return existing
+
+    candidates: list[ImageCandidate] = []
+    video = aweme.get("video") if isinstance(aweme.get("video"), dict) else {}
+    for key in (
+        "origin_cover",
+        "originCover",
+        "cover",
+        "video_cover",
+        "videoCover",
+        "ai_static_cover",
+    ):
+        if key in video:
+            collect_image_candidates(video.get(key), f"video.{key}", candidates)
+        if key in aweme:
+            collect_image_candidates(aweme.get(key), f"aweme.{key}", candidates)
+    candidates = unique_image_candidates(candidates)
+    if candidates:
+        cover_item = ImageItem(index=0, candidates=candidates)
+    elif images:
+        cover_item = images[0]
+    else:
+        dynamic_candidates: list[ImageCandidate] = []
+        for key in ("dynamic_cover", "dynamicCover", "animated_cover"):
+            if key in video:
+                collect_image_candidates(video.get(key), f"video.{key}", dynamic_candidates)
+        dynamic_candidates = unique_image_candidates(dynamic_candidates)
+        for candidate in dynamic_candidates:
+            candidate.preview = True
+        if not dynamic_candidates:
+            raise DouyinDownloadError("作品数据里没有可用封面或首图。")
+        cover_item = ImageItem(index=0, candidates=dynamic_candidates)
+
+    best = choose_best_image(make_session(), cover_item, referer)
+    return covers.save_cover_bytes(
+        output_root,
+        stem,
+        best.content,
+        width=best.width,
+        height=best.height,
+        extension=best.extension,
+        image_format=best.image_format,
+        source=best.candidate.source,
+        url=best.candidate.url,
+        log=logger,
+    )
 
 
 def collect_image_candidates(value, source: str, output: list[ImageCandidate]) -> None:

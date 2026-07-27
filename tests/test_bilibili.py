@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from downloaders import bilibili
 from services.task_runner import TaskOptions, extract_task_inputs, run_task
@@ -98,6 +98,93 @@ class BilibiliMediaTests(unittest.TestCase):
     def test_parse_content_range(self) -> None:
         self.assertEqual(bilibili.parse_content_range("bytes 0-4194303/250831695"), (0, 4194303, 250831695))
         self.assertEqual(bilibili.parse_content_range(""), (-1, -1, 0))
+
+    def test_build_ranges_covers_file_without_overlap(self) -> None:
+        self.assertEqual(bilibili.build_ranges(10, 4), [(0, 3), (4, 7), (8, 9)])
+
+    @patch("downloaders.bilibili._RANGE_CHUNK_SIZE", 4)
+    @patch("downloaders.bilibili._download_range_chunk")
+    def test_parallel_range_download_writes_chunks_at_exact_offsets(self, download_chunk) -> None:
+        def fake_chunk(_urls, _headers, start, end, _total):
+            values = {0: b"ABCD", 4: b"EFGH", 8: b"IJ"}
+            return start, values[start][: end - start + 1]
+
+        download_chunk.side_effect = fake_chunk
+        with tempfile.TemporaryDirectory() as temp_name:
+            target = Path(temp_name) / "stream.m4s"
+            messages: list[str] = []
+            bilibili.download_parallel_stream(
+                ["https://cdn.example/video.m4s"],
+                {},
+                target,
+                "视频",
+                10,
+                messages.append,
+                max_workers=3,
+            )
+
+            self.assertEqual(target.read_bytes(), b"ABCDEFGHIJ")
+        self.assertTrue(any("3 路连接" in message for message in messages))
+
+    @patch("downloaders.bilibili.time.sleep")
+    @patch("downloaders.bilibili._thread_http_session")
+    def test_range_chunk_rotates_to_backup_node(self, thread_session, _sleep) -> None:
+        class FakeResponse:
+            status_code = 206
+            headers = {"Content-Range": "bytes 0-3/10"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def iter_content(self, _chunk_size):
+                return [b"data"]
+
+        session = MagicMock()
+        session.get.side_effect = [
+            bilibili.requests.ConnectionError("primary failed"),
+            FakeResponse(),
+        ]
+        thread_session.return_value = session
+
+        start, data = bilibili._download_range_chunk(
+            ["https://primary.example/video", "https://backup.example/video"],
+            {},
+            0,
+            3,
+            10,
+        )
+
+        self.assertEqual((start, data), (0, b"data"))
+        self.assertEqual(session.get.call_args_list[0].args[0], "https://primary.example/video")
+        self.assertEqual(session.get.call_args_list[1].args[0], "https://backup.example/video")
+
+    @patch("downloaders.bilibili.download_stream_sequential")
+    @patch("downloaders.bilibili.download_parallel_stream")
+    @patch("downloaders.bilibili.choose_working_urls")
+    def test_parallel_failure_falls_back_to_sequential(
+        self,
+        choose_urls,
+        parallel_download,
+        sequential_download,
+    ) -> None:
+        choose_urls.return_value = (["https://cdn.example/video"], 10)
+        parallel_download.side_effect = bilibili._ParallelDownloadUnavailable("range failed")
+        messages: list[str] = []
+
+        bilibili.download_stream(
+            {"url": "https://cdn.example/video", "filesize": 10},
+            Path("unused.m4s"),
+            "视频",
+            messages.append,
+            max_workers=4,
+        )
+
+        parallel_download.assert_called_once()
+        sequential_download.assert_called_once()
+        self.assertTrue(any("自动切换到稳定模式" in message for message in messages))
 
     def test_stream_item_urls_includes_backups(self) -> None:
         urls = bilibili.stream_item_urls(

@@ -24,6 +24,7 @@ class TaskOptions:
     collection_limit: int | None = None
     collection_id: str = ""
     collection_name: str = ""
+    download_cover: bool = False
 
 
 def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
@@ -51,7 +52,7 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
         return run_bilibili_urls(options, log)
     if options.platform == "小红书":
         if options.feature in {"收藏作品", "收藏视频", "收藏夹"}:
-            return xiaohongshu.download_collection(
+            report = xiaohongshu.download_collection(
                 options.collection_id,
                 options.collection_name or options.collection_id,
                 options.output_root,
@@ -59,11 +60,14 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
                 log=log,
                 max_workers=options.max_workers,
                 use_idm=options.download_engine,
+                download_cover=options.download_cover,
             )
+            report["cover_failures"] = collect_collection_cover_failures(report)
+            return report
         return run_xhs_urls(options, log)
 
     if options.feature == "收藏夹":
-        return download_collection(
+        report = download_collection(
             options.collection_id,
             options.collection_name or options.collection_id,
             options.output_root,
@@ -71,7 +75,10 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
             log=log,
             max_workers=options.max_workers,
             use_idm=options.download_engine,
+            download_cover=options.download_cover,
         )
+        report["cover_failures"] = collect_collection_cover_failures(report)
+        return report
     return run_douyin_urls(options, log)
 
 
@@ -94,8 +101,14 @@ def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
             root,
             log=log,
             max_workers=options.max_workers,
+            download_cover=options.download_cover,
         )
-        return {"output_dir": str(root), "items": [report], "failures": []}
+        return {
+            "output_dir": str(root),
+            "items": [report],
+            "failures": [],
+            "cover_failures": collect_cover_failures([report], [url]),
+        }
     except Exception as exc:  # noqa: BLE001 - return a GUI-readable failure report.
         message = str(exc)
         log(f"任务失败：{message}")
@@ -110,13 +123,33 @@ def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
     reports = []
     failures = []
     root = options.output_root
-    log("YouTube 将下载公开可获取的最高画质；需要登录、年龄验证或私享的视频暂不支持。")
+    auth_context = youtube.read_youtube_auth_context()
+    auth_mode = str(auth_context.get("mode") or "anonymous")
+    if auth_context.get("error"):
+        log(f"YouTube 登录配置异常：{auth_context['error']}")
+    elif auth_mode == "firefox":
+        log("YouTube 已启用 Firefox 登录状态，将按当前账号权限选择可获取的最高画质。")
+    elif auth_mode == "chrome":
+        log("YouTube 将尝试读取现有 Chrome 登录状态；若 Windows 阻止解密，请改用 Cookie 文件。")
+    elif auth_mode == "edge":
+        log("YouTube 将尝试读取现有 Edge 登录状态；若 Windows 阻止解密，请改用 Cookie 文件。")
+    elif auth_mode == "cookie_file":
+        log("YouTube 已启用导入的 Cookie，将按当前账号权限选择可获取的最高画质。")
+    else:
+        log("YouTube 当前使用匿名模式，将下载公开可获取的最高画质。")
 
     def run_one(index: int, url: str, per_item_workers: int) -> dict:
         log(f"\n===== YouTube 任务 {index}/{len(options.inputs)} =====")
         log(url)
         try:
-            report = youtube.download_video(url, root, log=log, max_workers=per_item_workers)
+            report = youtube.download_video(
+                url,
+                root,
+                log=log,
+                max_workers=per_item_workers,
+                auth_context=auth_context,
+                download_cover=options.download_cover,
+            )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
@@ -124,6 +157,9 @@ def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
             return {"index": index, "url": url, "status": "failed", "error": message}
 
     outer_workers, per_item_workers = split_url_workers(len(options.inputs), options.max_workers)
+    if auth_mode != "anonymous" and outer_workers > 1:
+        outer_workers = 1
+        log("已启用 YouTube 登录状态：批量视频改为逐个解析，降低账号触发请求限流的风险。")
     if len(options.inputs) > 1:
         log(f"批量任务并发：视频 {outer_workers}，单视频分片 {per_item_workers}")
     results = run_url_batch(options.inputs, outer_workers, per_item_workers, run_one)
@@ -132,7 +168,12 @@ def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
             reports.append(result["report"])
         else:
             failures.append({"url": result.get("url", ""), "error": result.get("error", "")})
-    return {"output_dir": str(root), "items": reports, "failures": failures}
+    return {
+        "output_dir": str(root),
+        "items": reports,
+        "failures": failures,
+        "cover_failures": collect_cover_failures(reports, options.inputs),
+    }
 
 
 def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
@@ -157,7 +198,12 @@ def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
         log(url)
         try:
             report = bilibili.download_video(
-                url, root, log=log, max_workers=per_item_workers, cookie_header=cookie_header
+                url,
+                root,
+                log=log,
+                max_workers=per_item_workers,
+                cookie_header=cookie_header,
+                download_cover=options.download_cover,
             )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
@@ -174,7 +220,12 @@ def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
             reports.append(result["report"])
         else:
             failures.append({"url": result.get("url", ""), "error": result.get("error", "")})
-    return {"output_dir": str(root), "items": reports, "failures": failures}
+    return {
+        "output_dir": str(root),
+        "items": reports,
+        "failures": failures,
+        "cover_failures": collect_cover_failures(reports, options.inputs),
+    }
 
 
 def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
@@ -189,14 +240,35 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
         log(url)
         try:
             if options.feature == "评论区图片":
-                report = douyin.download_comment_images(url, comment_root, limit=options.comment_limit, log=log, max_workers=per_item_workers)
+                report = douyin.download_comment_images(
+                    url,
+                    comment_root,
+                    limit=options.comment_limit,
+                    log=log,
+                    max_workers=per_item_workers,
+                    download_cover=options.download_cover,
+                )
             elif options.feature == "作品媒体+评论区图片":
-                media_report = douyin.download_note(url, media_root, log=log, max_workers=per_item_workers, use_idm=options.download_engine)
+                media_report = douyin.download_note(
+                    url,
+                    media_root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    use_idm=options.download_engine,
+                    download_cover=options.download_cover,
+                )
                 comment_report = douyin.download_comment_images(url, comment_root, limit=options.comment_limit, log=log, max_workers=per_item_workers)
                 comment_report["media_report"] = media_report
                 report = comment_report
             else:
-                report = douyin.download_note(url, media_root, log=log, max_workers=per_item_workers, use_idm=options.download_engine)
+                report = douyin.download_note(
+                    url,
+                    media_root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    use_idm=options.download_engine,
+                    download_cover=options.download_cover,
+                )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
@@ -212,7 +284,12 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
             reports.append(result["report"])
         else:
             failures.append({"url": result.get("url", ""), "error": result.get("error", "")})
-    return {"output_dir": str(root), "items": reports, "failures": failures}
+    return {
+        "output_dir": str(root),
+        "items": reports,
+        "failures": failures,
+        "cover_failures": collect_cover_failures(reports, options.inputs),
+    }
 
 
 def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
@@ -225,14 +302,35 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
         log(url)
         try:
             if options.feature == "评论区图片":
-                report = xiaohongshu.download_comment_images(url, root, limit=options.comment_limit, log=log, max_workers=per_item_workers)
+                report = xiaohongshu.download_comment_images(
+                    url,
+                    root,
+                    limit=options.comment_limit,
+                    log=log,
+                    max_workers=per_item_workers,
+                    download_cover=options.download_cover,
+                )
             elif options.feature == "作品媒体+评论区图片":
-                media_report = xiaohongshu.download_note(url, root, log=log, max_workers=per_item_workers, use_idm=options.download_engine)
+                media_report = xiaohongshu.download_note(
+                    url,
+                    root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    use_idm=options.download_engine,
+                    download_cover=options.download_cover,
+                )
                 comment_report = xiaohongshu.download_comment_images(url, root, limit=options.comment_limit, log=log, max_workers=per_item_workers)
                 comment_report["media_report"] = media_report
                 report = comment_report
             else:
-                report = xiaohongshu.download_note(url, root, log=log, max_workers=per_item_workers, use_idm=options.download_engine)
+                report = xiaohongshu.download_note(
+                    url,
+                    root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    use_idm=options.download_engine,
+                    download_cover=options.download_cover,
+                )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
@@ -248,7 +346,52 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
             reports.append(result["report"])
         else:
             failures.append({"url": result.get("url", ""), "error": result.get("error", "")})
-    return {"output_dir": str(root), "items": reports, "failures": failures}
+    return {
+        "output_dir": str(root),
+        "items": reports,
+        "failures": failures,
+        "cover_failures": collect_cover_failures(reports, options.inputs),
+    }
+
+
+def collect_cover_failures(reports: list[dict], urls: list[str]) -> list[dict]:
+    failures: list[dict] = []
+    for index, report in enumerate(reports):
+        current = report
+        media_report = current.get("media_report")
+        if isinstance(media_report, dict):
+            current = media_report
+        error = str(current.get("cover_error") or "")
+        if error:
+            failures.append(
+                {
+                    "url": str(
+                        current.get("source_url")
+                        or current.get("webpage_url")
+                        or (urls[index] if index < len(urls) else "")
+                    ),
+                    "error": error,
+                }
+            )
+    return failures
+
+
+def collect_collection_cover_failures(report: dict) -> list[dict]:
+    failures: list[dict] = []
+    items = report.get("items") if isinstance(report.get("items"), list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_report = item.get("report") if isinstance(item.get("report"), dict) else {}
+        error = str(item_report.get("cover_error") or "")
+        if error:
+            failures.append(
+                {
+                    "url": str(item.get("url") or item_report.get("source_url") or ""),
+                    "error": error,
+                }
+            )
+    return failures
 
 
 def split_url_workers(total_inputs: int, max_workers: int) -> tuple[int, int]:

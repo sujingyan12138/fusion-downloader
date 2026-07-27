@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+from . import covers
+
 
 LogFn = Callable[[str], None]
 
@@ -73,6 +75,7 @@ def download_video(
     output_root: Path,
     log: LogFn | None = None,
     max_workers: int = 4,
+    download_cover: bool = False,
 ) -> dict:
     raw_logger = log or (lambda _message: None)
     logger = lambda message: _emit_log(raw_logger, message)
@@ -119,6 +122,12 @@ def download_video(
             target = unique_path(output_root / f"{stem}{suffix}")
             shutil.move(str(media_path), str(target))
             report = build_report(info, target, probe)
+            if download_cover:
+                try:
+                    report["cover"] = download_cover_from_info(info, output_root, logger)
+                except covers.CoverDownloadError as exc:
+                    report["cover_error"] = str(exc)
+                    logger(f"TikTok 封面获取失败：{exc}")
             logger(
                 f"TikTok 下载完成：{report['resolution']}，"
                 f"视频 {report['video_codec']}，音频 {report['audio_codec']}"
@@ -293,6 +302,28 @@ def build_report(info: dict, target: Path, probe: dict) -> dict:
         "watermarked": "watermarked" in format_note.lower(),
         "download_engine": "yt-dlp + FFmpeg/FFprobe",
     }
+
+
+def download_cover_from_info(
+    info: dict,
+    output_root: str | Path,
+    logger: LogFn | None = None,
+) -> dict:
+    video_id = str(info.get("id") or "")
+    stem = safe_filename(
+        f"TikTok_{info.get('uploader') or info.get('creator') or '未知作者'}_"
+        f"{info.get('title') or info.get('description') or video_id or '未命名作品'}_"
+        f"{video_id}",
+        150,
+    )
+    referer = str(info.get("webpage_url") or info.get("original_url") or "https://www.tiktok.com/")
+    return covers.download_best_cover(
+        covers.info_cover_candidates(info, source_prefix="tiktok"),
+        output_root,
+        stem,
+        referer=referer,
+        log=logger,
+    )
 
 
 def format_description(info: dict) -> str:

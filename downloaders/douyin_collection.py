@@ -78,6 +78,7 @@ def download_collection(
     log: LogFn | None = None,
     max_workers: int = 4,
     use_idm: bool | str = "smart",
+    download_cover: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     clean_id = str(collection_id or "").strip()
@@ -117,11 +118,19 @@ def download_collection(
             continue
         url = collection_aweme_url(aweme)
         has_video = bool(douyin.extract_videos(aweme))
-        if has_video and has_existing_aweme_nowm_video(collection_dir, aweme_id, existing_media_names):
+        if (
+            not download_cover
+            and has_video
+            and has_existing_aweme_nowm_video(collection_dir, aweme_id, existing_media_names)
+        ):
             logger(f"已存在无水印视频，跳过收藏夹作品 {index}/{len(awemes)}：{aweme_id}")
             report["skipped"].append({"index": index, "aweme_id": aweme_id, "url": url, "reason": "exists_nowm"})
             continue
-        if not has_video and has_existing_aweme_nowm_images(collection_dir, aweme_id, existing_media_names):
+        if (
+            not download_cover
+            and not has_video
+            and has_existing_aweme_nowm_images(collection_dir, aweme_id, existing_media_names)
+        ):
             logger(f"已存在无水印原图下载结果，跳过收藏夹作品 {index}/{len(awemes)}：{aweme_id}")
             report["skipped"].append({"index": index, "aweme_id": aweme_id, "url": url, "reason": "exists_nowm_orig"})
             continue
@@ -146,6 +155,7 @@ def download_collection(
                 use_idm=use_idm,
                 cookie_header=str(context.get("cookie") or ""),
                 fallback_aweme=aweme,
+                download_cover=download_cover,
             )
             return {"kind": "item", "item": {"index": index, "aweme_id": aweme_id, "status": "ok", "report": item_report, "source": "download_note"}}
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.
