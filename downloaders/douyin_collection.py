@@ -79,6 +79,7 @@ def download_collection(
     max_workers: int = 4,
     use_idm: bool | str = "smart",
     download_cover: bool = False,
+    cover_only: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     clean_id = str(collection_id or "").strip()
@@ -139,7 +140,8 @@ def download_collection(
     collection_workers = max(1, min(len(pending), max(1, min(max_workers, 4))))
     per_item_workers = max(1, min(max_workers, 3))
     if len(pending) > 1:
-        logger(f"收藏夹作品并发：{collection_workers}，单作品媒体并发：{per_item_workers}")
+        item_label = "封面" if cover_only else "媒体"
+        logger(f"收藏夹作品并发：{collection_workers}，单作品{item_label}并发：{per_item_workers}")
 
     def run_one(item: tuple[int, dict, str, str]) -> dict:
         index, aweme, aweme_id, url = item
@@ -155,7 +157,8 @@ def download_collection(
                 use_idm=use_idm,
                 cookie_header=str(context.get("cookie") or ""),
                 fallback_aweme=aweme,
-                download_cover=download_cover,
+                download_cover=download_cover or cover_only,
+                cover_only=cover_only,
             )
             return {"kind": "item", "item": {"index": index, "aweme_id": aweme_id, "status": "ok", "report": item_report, "source": "download_note"}}
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.

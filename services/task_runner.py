@@ -25,6 +25,7 @@ class TaskOptions:
     collection_id: str = ""
     collection_name: str = ""
     download_cover: bool = False
+    cover_only: bool = False
 
 
 def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
@@ -60,7 +61,8 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
                 log=log,
                 max_workers=options.max_workers,
                 use_idm=options.download_engine,
-                download_cover=options.download_cover,
+                download_cover=options.download_cover or options.cover_only,
+                cover_only=options.cover_only,
             )
             report["cover_failures"] = collect_collection_cover_failures(report)
             return report
@@ -75,7 +77,8 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
             log=log,
             max_workers=options.max_workers,
             use_idm=options.download_engine,
-            download_cover=options.download_cover,
+            download_cover=options.download_cover or options.cover_only,
+            cover_only=options.cover_only,
         )
         report["cover_failures"] = collect_collection_cover_failures(report)
         return report
@@ -84,7 +87,10 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
 
 def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
     root = options.output_root
-    log("TikTok 将下载公开单作品当前可获取的最高质量；私密、登录或地区受限内容暂不支持。")
+    if options.cover_only:
+        log("TikTok 仅封面模式：解析并保存最高质量作品封面，不下载视频媒体。")
+    else:
+        log("TikTok 将下载公开单作品当前可获取的最高质量；私密、登录或地区受限内容暂不支持。")
     if not options.inputs:
         return {
             "output_dir": str(root),
@@ -96,13 +102,16 @@ def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
     log("\n===== TikTok 单作品任务 =====")
     log(url)
     try:
-        report = tiktok.download_video(
-            url,
-            root,
-            log=log,
-            max_workers=options.max_workers,
-            download_cover=options.download_cover,
-        )
+        if options.cover_only:
+            report = tiktok.download_cover_only(url, root, log=log)
+        else:
+            report = tiktok.download_video(
+                url,
+                root,
+                log=log,
+                max_workers=options.max_workers,
+                download_cover=options.download_cover,
+            )
         return {
             "output_dir": str(root),
             "items": [report],
@@ -142,14 +151,22 @@ def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
         log(f"\n===== YouTube 任务 {index}/{len(options.inputs)} =====")
         log(url)
         try:
-            report = youtube.download_video(
-                url,
-                root,
-                log=log,
-                max_workers=per_item_workers,
-                auth_context=auth_context,
-                download_cover=options.download_cover,
-            )
+            if options.cover_only:
+                report = youtube.download_cover_only(
+                    url,
+                    root,
+                    log=log,
+                    auth_context=auth_context,
+                )
+            else:
+                report = youtube.download_video(
+                    url,
+                    root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    auth_context=auth_context,
+                    download_cover=options.download_cover,
+                )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
@@ -197,14 +214,22 @@ def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
         log(f"\n===== Bilibili 任务 {index}/{len(options.inputs)} =====")
         log(url)
         try:
-            report = bilibili.download_video(
-                url,
-                root,
-                log=log,
-                max_workers=per_item_workers,
-                cookie_header=cookie_header,
-                download_cover=options.download_cover,
-            )
+            if options.cover_only:
+                report = bilibili.download_cover_only(
+                    url,
+                    root,
+                    log=log,
+                    cookie_header=cookie_header,
+                )
+            else:
+                report = bilibili.download_video(
+                    url,
+                    root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    cookie_header=cookie_header,
+                    download_cover=options.download_cover,
+                )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
@@ -239,7 +264,17 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
         log(f"\n===== 抖音任务 {index}/{len(options.inputs)} =====")
         log(url)
         try:
-            if options.feature == "评论区图片":
+            if options.cover_only:
+                report = douyin.download_note(
+                    url,
+                    media_root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    use_idm=options.download_engine,
+                    download_cover=True,
+                    cover_only=True,
+                )
+            elif options.feature == "评论区图片":
                 report = douyin.download_comment_images(
                     url,
                     comment_root,
@@ -301,7 +336,17 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
         log(f"\n===== 小红书任务 {index}/{len(options.inputs)} =====")
         log(url)
         try:
-            if options.feature == "评论区图片":
+            if options.cover_only:
+                report = xiaohongshu.download_note(
+                    url,
+                    root,
+                    log=log,
+                    max_workers=per_item_workers,
+                    use_idm=options.download_engine,
+                    download_cover=True,
+                    cover_only=True,
+                )
+            elif options.feature == "评论区图片":
                 report = xiaohongshu.download_comment_images(
                     url,
                     root,

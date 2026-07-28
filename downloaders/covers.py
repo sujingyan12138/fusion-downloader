@@ -268,6 +268,29 @@ def save_cover_bytes(
     return report
 
 
+def build_cover_only_report(
+    platform: str,
+    content_id: str,
+    title: str,
+    author: str,
+    webpage_url: str,
+    cover: dict,
+) -> dict:
+    output_path = str(cover.get("path") or "")
+    return {
+        "platform": platform,
+        "kind": "cover",
+        "content_id": content_id,
+        "title": title,
+        "author": author,
+        "webpage_url": webpage_url,
+        "output_dir": str(Path(output_path).parent) if output_path else "",
+        "output_path": output_path,
+        "filename": str(cover.get("filename") or Path(output_path).name),
+        "cover": cover,
+    }
+
+
 def existing_cover_report(output_root: str | Path, stem: str) -> dict | None:
     root = Path(output_root)
     if not root.is_dir():

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import queue
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -19,7 +22,11 @@ if getattr(sys, "frozen", False):
 else:
     APP_DIR = Path(__file__).resolve().parent
 
-OUTPUT_ROOT = APP_DIR / "下载结果"
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+ICON_PATH = RESOURCE_DIR / "favicon.ico"
+OUTPUT_DIR_NAME = "下载结果"
+DEFAULT_OUTPUT_PARENT = APP_DIR
+SETTINGS_PATH = APP_DIR / "下载器设置.json"
 DOUYIN_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图片", "收藏夹")
 XHS_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图片", "收藏作品")
 BILIBILI_FEATURES = ("视频媒体",)
@@ -27,17 +34,619 @@ YOUTUBE_FEATURES = ("视频媒体",)
 TIKTOK_FEATURES = ("视频媒体",)
 
 
+COLORS = {
+    "background": "#F2F6F4",
+    "surface": "#FFFFFF",
+    "surface_subtle": "#F6F9F7",
+    "surface_hover": "#EAF2EE",
+    "text": "#14231C",
+    "text_secondary": "#64736C",
+    "text_tertiary": "#87948E",
+    "selection": "#00B176",
+    "selection_active": "#009F6A",
+    "selection_pressed": "#00875A",
+    "selection_hover_soft": "#E2F8F0",
+    "selection_text": "#063A2B",
+    "selection_focus": "#007E54",
+    "accent_dark": "#007E54",
+    "accent_deep": "#0E3B2E",
+    "accent_soft": "#DFF8EF",
+    "accent_pale": "#F0FBF7",
+    "border": "#DCE6E1",
+    "divider": "#E8EFEB",
+    "success": "#009865",
+    "danger": "#D94D5C",
+    "danger_soft": "#FFF0F2",
+    "log": "#F6FAF8",
+    "shadow": "#DCE6E1",
+}
+
+
+def output_root_for_parent(parent: Path) -> Path:
+    return parent / OUTPUT_DIR_NAME
+
+
+def load_output_parent(
+    settings_path: Path = SETTINGS_PATH,
+    default_parent: Path = DEFAULT_OUTPUT_PARENT,
+) -> Path:
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        saved_parent = str(data.get("output_parent") or "").strip()
+        candidate = Path(saved_parent).expanduser()
+        if candidate.is_absolute():
+            return candidate
+    except (OSError, UnicodeError, json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    return default_parent
+
+
+def save_output_parent(parent: Path, settings_path: Path = SETTINGS_PATH) -> None:
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({"output_parent": str(parent)}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _rounded_points(width: int, height: int, radius: int, inset: int = 1) -> list[int]:
+    left = inset
+    top = inset
+    right = max(left + 1, width - inset)
+    bottom = max(top + 1, height - inset)
+    radius = max(2, min(radius, (right - left) // 2, (bottom - top) // 2))
+    return [
+        left + radius,
+        top,
+        right - radius,
+        top,
+        right,
+        top,
+        right,
+        top + radius,
+        right,
+        bottom - radius,
+        right,
+        bottom,
+        right - radius,
+        bottom,
+        left + radius,
+        bottom,
+        left,
+        bottom,
+        left,
+        bottom - radius,
+        left,
+        top + radius,
+        left,
+        top,
+    ]
+
+
+class RoundedCard(tk.Canvas):
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        canvas_bg: str,
+        fill: str,
+        radius: int = 24,
+        outline: str | None = None,
+        inset: int = 22,
+        shadow: bool = True,
+        shadow_fill: str | None = None,
+    ) -> None:
+        super().__init__(
+            master,
+            bg=canvas_bg,
+            borderwidth=0,
+            highlightthickness=0,
+            height=120,
+        )
+        self._fill = fill
+        self._outline = outline or fill
+        self._radius = radius
+        self._inset = inset
+        self._shadow_offset = 3 if shadow else 0
+        self._requested_height = 120
+        self._shadow = (
+            self.create_polygon(
+                _rounded_points(100, 100, radius),
+                fill=shadow_fill or COLORS["shadow"],
+                outline="",
+                smooth=True,
+                splinesteps=48,
+            )
+            if shadow
+            else None
+        )
+        self._surface = self.create_polygon(
+            _rounded_points(100, 100, radius),
+            fill=fill,
+            outline=self._outline,
+            width=1,
+            smooth=True,
+            splinesteps=48,
+        )
+        self.body = tk.Frame(self, bg=fill, borderwidth=0, highlightthickness=0)
+        self._body_window = self.create_window(
+            (inset, inset),
+            window=self.body,
+            anchor="nw",
+        )
+        self.bind("<Configure>", self._redraw)
+        self.body.bind("<Configure>", lambda _event: self.after_idle(self._sync_height))
+
+    def _sync_height(self) -> None:
+        if not self.winfo_exists():
+            return
+        wanted = max(80, self.body.winfo_reqheight() + self._inset * 2 + self._shadow_offset)
+        if wanted != self._requested_height:
+            self._requested_height = wanted
+            super().configure(height=wanted)
+
+    def _redraw(self, event: tk.Event) -> None:
+        width = max(20, int(event.width))
+        height = max(20, int(event.height))
+        if self._shadow is not None:
+            shadow_points = _rounded_points(
+                width,
+                max(10, height - self._shadow_offset),
+                self._radius,
+                inset=1,
+            )
+            shadow_points = [
+                coordinate + (self._shadow_offset if index % 2 else 0)
+                for index, coordinate in enumerate(shadow_points)
+            ]
+            self.coords(self._shadow, *shadow_points)
+        surface_height = max(10, height - self._shadow_offset)
+        self.coords(
+            self._surface,
+            *_rounded_points(width, surface_height, self._radius, inset=1),
+        )
+        self.itemconfigure(
+            self._body_window,
+            width=max(1, width - self._inset * 2),
+        )
+
+
+class HeroBanner(tk.Canvas):
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(
+            master,
+            height=142,
+            bg=COLORS["background"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        self.bind("<Configure>", self._draw)
+
+    def _draw(self, event: tk.Event | None = None) -> None:
+        self.delete("all")
+        width = max(320, int(event.width) if event is not None else self.winfo_width())
+        height = max(120, int(event.height) if event is not None else self.winfo_height())
+        self.create_polygon(
+            _rounded_points(width, height, 28, inset=1),
+            fill=COLORS["accent_deep"],
+            outline=COLORS["accent_deep"],
+            smooth=True,
+            splinesteps=48,
+        )
+        self.create_oval(
+            width - 360,
+            -170,
+            width + 70,
+            230,
+            fill="#105D45",
+            outline="",
+        )
+        self.create_oval(
+            width - 235,
+            -85,
+            width + 55,
+            205,
+            fill="#087A52",
+            outline="",
+        )
+        self.create_text(
+            36,
+            25,
+            text="DOWNLOAD STUDIO",
+            anchor="nw",
+            fill="#6FE1B9",
+            font=("Segoe UI Variable Text Semibold", 9),
+        )
+        title_width = max(260, width - 72)
+        self.create_text(
+            36,
+            50,
+            text="把复杂下载，变成一个动作。",
+            anchor="nw",
+            width=title_width,
+            fill="#FFFFFF",
+            font=("Microsoft YaHei UI", 21, "bold"),
+        )
+        self.create_text(
+            36,
+            93,
+            text="一个入口，保存五个平台的最高质量作品、封面与收藏内容。",
+            anchor="nw",
+            width=title_width,
+            fill="#C5DED4",
+            font=("Microsoft YaHei UI", 9),
+        )
+class PillButton(tk.Canvas):
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        text: str,
+        command: Callable[[], object] | None,
+        variant: str = "secondary",
+        canvas_bg: str,
+        min_width: int = 88,
+        height: int = 40,
+        font: tuple[str, int] | tuple[str, int, str] = ("Microsoft YaHei UI", 10),
+    ) -> None:
+        self._text = text
+        self._command = command
+        self._variant = variant
+        self._state = "normal"
+        self._hovered = False
+        self._pressed = False
+        self._focused = False
+        self._height = height
+        self._font_spec = font
+        measure_font = tkfont.Font(root=master, font=font)
+        width = max(min_width, measure_font.measure(text) + 30)
+        super().__init__(
+            master,
+            width=width,
+            height=height,
+            bg=canvas_bg,
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=1,
+            cursor="hand2",
+        )
+        self._shape = self.create_polygon(
+            _rounded_points(width, height, height // 2, inset=1),
+            smooth=True,
+            splinesteps=48,
+        )
+        self._label = self.create_text(
+            width // 2,
+            height // 2,
+            text=text,
+            font=font,
+        )
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<Key-space>", self._on_keyboard_invoke)
+        self.bind("<Key-Return>", self._on_keyboard_invoke)
+        self._draw()
+
+    def _palette(self) -> tuple[str, str]:
+        if self._state == "disabled":
+            if self._variant == "primary":
+                return "#AAB8B1", "#FFFFFF"
+            return "#EEF2F0", "#A1ADA7"
+        if self._variant == "primary":
+            if self._pressed:
+                return "#006A47", "#FFFFFF"
+            if self._hovered:
+                return "#00734D", "#FFFFFF"
+            return COLORS["accent_dark"], "#FFFFFF"
+        if self._pressed:
+            return "#DDE8E2", COLORS["text"]
+        if self._hovered:
+            return COLORS["surface_hover"], COLORS["text"]
+        return "#EDF3F0", COLORS["text"]
+
+    def _draw(self) -> None:
+        width = max(4, self.winfo_width())
+        height = max(4, self.winfo_height())
+        fill, foreground = self._palette()
+        if self._focused and self._state != "disabled":
+            outline = COLORS["selection"]
+        else:
+            outline = fill
+        outline_width = 2 if self._focused and self._state != "disabled" else 1
+        self.coords(self._shape, *_rounded_points(width, height, height // 2, inset=2))
+        self.itemconfigure(
+            self._shape,
+            fill=fill,
+            outline=outline,
+            width=outline_width,
+        )
+        self.coords(self._label, width // 2, height // 2)
+        self.itemconfigure(self._label, text=self._text, fill=foreground, font=self._font_spec)
+        super().configure(cursor="arrow" if self._state == "disabled" else "hand2")
+
+    def _on_enter(self, _event: tk.Event) -> None:
+        self._hovered = True
+        self._draw()
+
+    def _on_leave(self, _event: tk.Event) -> None:
+        self._hovered = False
+        self._pressed = False
+        self._draw()
+
+    def _on_press(self, _event: tk.Event) -> None:
+        if self._state == "disabled":
+            return
+        self.focus_set()
+        self._pressed = True
+        self._draw()
+
+    def _on_release(self, event: tk.Event) -> None:
+        if self._state == "disabled":
+            return
+        should_invoke = (
+            self._pressed
+            and 0 <= int(event.x) <= self.winfo_width()
+            and 0 <= int(event.y) <= self.winfo_height()
+        )
+        self._pressed = False
+        self._draw()
+        if should_invoke and self._command is not None:
+            self._command()
+
+    def _on_focus_in(self, _event: tk.Event) -> None:
+        self._focused = True
+        self._draw()
+
+    def _on_focus_out(self, _event: tk.Event) -> None:
+        self._focused = False
+        self._pressed = False
+        self._draw()
+
+    def _on_keyboard_invoke(self, _event: tk.Event) -> str:
+        if self._state != "disabled" and self._command is not None:
+            self._command()
+        return "break"
+
+    def configure(self, cnf: dict | None = None, **kwargs: object) -> object:
+        if cnf is not None:
+            return super().configure(cnf, **kwargs)
+        text = kwargs.pop("text", None)
+        state = kwargs.pop("state", None)
+        command = kwargs.pop("command", None)
+        if text is not None:
+            self._text = str(text)
+        if state is not None:
+            self._state = str(state)
+        if command is not None:
+            self._command = command if callable(command) else None
+        result = super().configure(**kwargs) if kwargs else None
+        self._draw()
+        return result
+
+    config = configure
+
+    def cget(self, key: str) -> object:
+        if key == "text":
+            return self._text
+        if key == "state":
+            return self._state
+        return super().cget(key)
+
+
+class CheckmarkToggle(tk.Canvas):
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        text: str,
+        variable: tk.BooleanVar,
+        command: Callable[[], object] | None = None,
+        canvas_bg: str,
+        font: tuple[str, int] | tuple[str, int, str] = ("Microsoft YaHei UI", 9),
+    ) -> None:
+        self._text = text
+        self._variable = variable
+        self._command = command
+        self._state = "normal"
+        self._hovered = False
+        self._pressed = False
+        self._focused = False
+        self._font_spec = font
+        self._indicator_size = 18
+        measure_font = tkfont.Font(root=master, font=font)
+        width = self._indicator_size + 9 + measure_font.measure(text) + 4
+        height = 32
+        super().__init__(
+            master,
+            width=width,
+            height=height,
+            bg=canvas_bg,
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=1,
+            cursor="hand2",
+        )
+        top = (height - self._indicator_size) // 2
+        box_points = _rounded_points(
+            self._indicator_size,
+            self._indicator_size,
+            5,
+            inset=1,
+        )
+        box_points = [
+            coordinate + (top if index % 2 else 1)
+            for index, coordinate in enumerate(box_points)
+        ]
+        self._box = self.create_polygon(
+            box_points,
+            smooth=True,
+            splinesteps=24,
+        )
+        self._check = self.create_line(
+            6,
+            top + 9,
+            9,
+            top + 12,
+            14,
+            top + 6,
+            width=2.4,
+            capstyle=tk.ROUND,
+            joinstyle=tk.ROUND,
+        )
+        self._label = self.create_text(
+            self._indicator_size + 9,
+            height // 2,
+            text=text,
+            anchor="w",
+            font=font,
+        )
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        self.bind("<Key-space>", self._on_keyboard_invoke)
+        self.bind("<Key-Return>", self._on_keyboard_invoke)
+        self._variable.trace_add("write", self._on_variable_change)
+        self._draw()
+
+    def _draw(self) -> None:
+        selected = bool(self._variable.get())
+        if self._state == "disabled":
+            fill = "#B7C2BB" if selected else "#F1F2F1"
+            outline = fill if selected else "#D3D7D4"
+            foreground = "#AEAEB2"
+        elif selected:
+            fill = (
+                COLORS["selection_pressed"]
+                if self._pressed
+                else COLORS["selection_active"]
+                if self._hovered
+                else COLORS["selection"]
+            )
+            outline = COLORS["selection_focus"] if self._focused else fill
+            foreground = COLORS["text"]
+        else:
+            fill = COLORS["selection_hover_soft"] if self._hovered else COLORS["surface"]
+            outline = COLORS["selection_focus"] if self._focused else "#AAB6AF"
+            foreground = COLORS["text"]
+        self.itemconfigure(
+            self._box,
+            fill=fill,
+            outline=outline,
+            width=2 if self._focused and self._state != "disabled" else 1,
+        )
+        self.itemconfigure(
+            self._check,
+            fill="#FFFFFF",
+            state="normal" if selected else "hidden",
+        )
+        self.itemconfigure(self._label, fill=foreground, text=self._text, font=self._font_spec)
+        super().configure(cursor="arrow" if self._state == "disabled" else "hand2")
+
+    def _toggle(self) -> None:
+        if self._state == "disabled":
+            return
+        self._variable.set(not bool(self._variable.get()))
+        if self._command is not None:
+            self._command()
+
+    def _on_variable_change(self, *_args: object) -> None:
+        if self.winfo_exists():
+            self._draw()
+
+    def _on_enter(self, _event: tk.Event) -> None:
+        self._hovered = True
+        self._draw()
+
+    def _on_leave(self, _event: tk.Event) -> None:
+        self._hovered = False
+        self._pressed = False
+        self._draw()
+
+    def _on_press(self, _event: tk.Event) -> None:
+        if self._state == "disabled":
+            return
+        self.focus_set()
+        self._pressed = True
+        self._draw()
+
+    def _on_release(self, event: tk.Event) -> None:
+        if self._state == "disabled":
+            return
+        should_toggle = (
+            self._pressed
+            and 0 <= int(event.x) <= self.winfo_width()
+            and 0 <= int(event.y) <= self.winfo_height()
+        )
+        self._pressed = False
+        self._draw()
+        if should_toggle:
+            self._toggle()
+
+    def _on_focus_in(self, _event: tk.Event) -> None:
+        self._focused = True
+        self._draw()
+
+    def _on_focus_out(self, _event: tk.Event) -> None:
+        self._focused = False
+        self._pressed = False
+        self._draw()
+
+    def _on_keyboard_invoke(self, _event: tk.Event) -> str:
+        self._toggle()
+        return "break"
+
+    def configure(self, cnf: dict | None = None, **kwargs: object) -> object:
+        if cnf is not None:
+            return super().configure(cnf, **kwargs)
+        state = kwargs.pop("state", None)
+        text = kwargs.pop("text", None)
+        command = kwargs.pop("command", None)
+        if state is not None:
+            self._state = str(state)
+        if text is not None:
+            self._text = str(text)
+        if command is not None:
+            self._command = command if callable(command) else None
+        result = super().configure(**kwargs) if kwargs else None
+        self._draw()
+        return result
+
+    config = configure
+
+    def cget(self, key: str) -> object:
+        if key == "text":
+            return self._text
+        if key == "state":
+            return self._state
+        return super().cget(key)
+
+
 class UnifiedDownloaderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("融合下载器")
-        self.geometry("1120x780")
-        self.minsize(980, 700)
-        self.configure(bg="#f6f8fb")
+        if ICON_PATH.is_file():
+            try:
+                self.iconbitmap(default=str(ICON_PATH))
+            except tk.TclError:
+                pass
+        self.geometry("1280x860")
+        self.minsize(920, 700)
+        self.configure(bg=COLORS["background"])
 
         self.log_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.collections: list[dict] = []
+        self.output_parent = load_output_parent()
+        self.output_root = output_root_for_parent(self.output_parent)
         self.last_output_dir: str | None = None
         self.total_tasks = 0
         self.finished_tasks = 0
@@ -55,21 +664,26 @@ class UnifiedDownloaderApp(tk.Tk):
         self.speed_var = tk.StringVar(value="balanced")
         self.run_mode_var = tk.StringVar(value="单个")
         self.download_cover_var = tk.BooleanVar(value=False)
+        self.cover_only_var = tk.BooleanVar(value=False)
         self.mode_manually_selected = False
         self.advanced_visible = tk.BooleanVar(value=False)
-        self.log_visible = tk.BooleanVar(value=False)
-        self.login_douyin_button: ttk.Button | None = None
-        self.login_xhs_button: ttk.Button | None = None
-        self.login_bilibili_button: ttk.Button | None = None
-        self.login_youtube_button: ttk.Button | None = None
-        self.check_login_button: ttk.Button | None = None
-        self.open_output_button: ttk.Button | None = None
-        self.paste_button: ttk.Button | None = None
-        self.clear_button: ttk.Button | None = None
+        self.log_visible = tk.BooleanVar(value=True)
+        self.login_douyin_button: PillButton | None = None
+        self.login_xhs_button: PillButton | None = None
+        self.login_bilibili_button: PillButton | None = None
+        self.login_youtube_button: PillButton | None = None
+        self.check_login_button: PillButton | None = None
+        self.open_output_button: PillButton | None = None
+        self.choose_output_button: PillButton | None = None
+        self.paste_button: PillButton | None = None
+        self.clear_button: PillButton | None = None
         self.copy_failure_button: ttk.Button | None = None
         self.copy_all_button: ttk.Button | None = None
         self.clear_log_button: ttk.Button | None = None
-        self.download_cover_check: ttk.Checkbutton | None = None
+        self.download_cover_check: CheckmarkToggle | None = None
+        self.cover_only_check: CheckmarkToggle | None = None
+        self.platform_buttons: list[ttk.Radiobutton] = []
+        self._wide_layout: bool | None = None
 
         self._setup_style()
         self._build_ui()
@@ -81,55 +695,389 @@ class UnifiedDownloaderApp(tk.Tk):
         style = ttk.Style(self)
         style.theme_use("clam")
         base_font = ("Microsoft YaHei UI", 10)
-        title_font = ("Microsoft YaHei UI", 28, "bold")
         style.configure(".", font=base_font)
-        style.configure("Root.TFrame", background="#f6f8fb")
-        style.configure("Topbar.TFrame", background="#f6f8fb")
-        style.configure("Panel.TFrame", background="#ffffff", relief="solid", borderwidth=1)
-        style.configure("PanelInner.TFrame", background="#ffffff", relief="flat")
-        style.configure("Advanced.TFrame", background="#f8fafd", relief="solid", borderwidth=1)
-        style.configure("StatCard.TFrame", background="#f8fafd", relief="solid", borderwidth=1)
-        style.configure("Title.TLabel", background="#f6f8fb", foreground="#172033", font=title_font)
-        style.configure("Subtitle.TLabel", background="#f6f8fb", foreground="#6e7788", font=("Microsoft YaHei UI", 10))
-        style.configure("PanelTitle.TLabel", background="#ffffff", foreground="#172033", font=("Microsoft YaHei UI", 12, "bold"))
-        style.configure("SectionTitle.TLabel", background="#ffffff", foreground="#172033", font=("Microsoft YaHei UI", 15, "bold"))
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
-        style.configure("Hint.TLabel", background="#ffffff", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
-        style.configure("AdvancedMuted.TLabel", background="#f8fafd", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
-        style.configure("AdvancedHint.TLabel", background="#f8fafd", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
-        style.configure("Status.TLabel", background="#ffffff", foreground="#303848", font=("Microsoft YaHei UI", 10))
-        style.configure("Success.TLabel", background="#ffffff", foreground="#0e9f8a", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("Danger.TLabel", background="#ffffff", foreground="#d64545", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("StatValue.TLabel", background="#f8fafd", foreground="#172033", font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("SuccessStatValue.TLabel", background="#f8fafd", foreground="#0e9f8a", font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("DangerStatValue.TLabel", background="#f8fafd", foreground="#d64545", font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("StatLabel.TLabel", background="#f8fafd", foreground="#6e7788", font=("Microsoft YaHei UI", 9))
-        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 11, "bold"), padding=(22, 11), borderwidth=0)
+        style.configure("Root.TFrame", background=COLORS["background"])
+        style.configure("Surface.TFrame", background=COLORS["surface"])
+        style.configure("PanelInner.TFrame", background=COLORS["surface"])
+        style.configure("Soft.TFrame", background=COLORS["surface_subtle"])
+        style.configure(
+            "Bento.TFrame",
+            background=COLORS["surface_subtle"],
+            borderwidth=1,
+            relief="solid",
+            bordercolor=COLORS["border"],
+            lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"],
+        )
+        style.configure(
+            "AccentSoft.TFrame",
+            background=COLORS["accent_pale"],
+        )
+        style.configure(
+            "NavTitle.TLabel",
+            background=COLORS["background"],
+            foreground=COLORS["text"],
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        style.configure(
+            "NavSubtitle.TLabel",
+            background=COLORS["background"],
+            foreground=COLORS["text_tertiary"],
+            font=("Microsoft YaHei UI", 8),
+        )
+        style.configure(
+            "Eyebrow.TLabel",
+            background=COLORS["background"],
+            foreground=COLORS["accent_dark"],
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        style.configure(
+            "Title.TLabel",
+            background=COLORS["background"],
+            foreground=COLORS["text"],
+            font=("Microsoft YaHei UI", 26, "bold"),
+        )
+        style.configure(
+            "Subtitle.TLabel",
+            background=COLORS["background"],
+            foreground=COLORS["text_secondary"],
+            font=("Microsoft YaHei UI", 10),
+        )
+        style.configure(
+            "SectionTitle.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text"],
+            font=("Microsoft YaHei UI", 15, "bold"),
+        )
+        style.configure(
+            "PanelTitle.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text"],
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        style.configure(
+            "Muted.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text_secondary"],
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "Hint.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text_tertiary"],
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "SoftMuted.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_secondary"],
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "BentoTitle.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text"],
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        style.configure(
+            "BentoMuted.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_secondary"],
+            font=("Microsoft YaHei UI", 8),
+        )
+        style.configure(
+            "AccentHint.TLabel",
+            background=COLORS["accent_pale"],
+            foreground=COLORS["accent_dark"],
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "AdvancedMuted.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_secondary"],
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "AdvancedHint.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_tertiary"],
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "StatusPill.TLabel",
+            background=COLORS["accent_pale"],
+            foreground=COLORS["accent_dark"],
+            padding=(12, 8),
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "StatValue.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text"],
+            font=("Segoe UI Variable Display Semib", 22),
+        )
+        style.configure(
+            "SuccessStatValue.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["success"],
+            font=("Segoe UI Variable Display Semib", 22),
+        )
+        style.configure(
+            "DangerStatValue.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["danger"],
+            font=("Segoe UI Variable Display Semib", 22),
+        )
+        style.configure(
+            "StatLabel.TLabel",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_secondary"],
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "Link.TButton",
+            background=COLORS["surface"],
+            foreground=COLORS["accent_dark"],
+            borderwidth=0,
+            focuscolor=COLORS["surface"],
+            padding=(3, 4),
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map(
+            "Link.TButton",
+            background=[("active", COLORS["surface"])],
+            foreground=[
+                ("disabled", "#AEAEB2"),
+                ("active", COLORS["selection_pressed"]),
+                ("!disabled", COLORS["accent_dark"]),
+            ],
+        )
+        style.configure(
+            "SoftLink.TButton",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["accent_dark"],
+            borderwidth=0,
+            focuscolor=COLORS["surface_subtle"],
+            padding=(3, 4),
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map(
+            "SoftLink.TButton",
+            background=[("active", COLORS["surface_subtle"])],
+            foreground=[
+                ("disabled", "#A1ADA7"),
+                ("active", COLORS["selection_pressed"]),
+                ("!disabled", COLORS["accent_dark"]),
+            ],
+        )
+        style.configure(
+            "Primary.TButton",
+            background=COLORS["accent_dark"],
+            foreground="#FFFFFF",
+            borderwidth=0,
+            padding=(16, 10),
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
         style.map(
             "Primary.TButton",
-            background=[("disabled", "#c8d1e0"), ("active", "#1f4fd1"), ("!disabled", "#2f6bff")],
-            foreground=[("disabled", "#ffffff"), ("!disabled", "#ffffff")],
+            background=[
+                ("disabled", "#AAB8B1"),
+                ("active", "#00734D"),
+                ("!disabled", COLORS["accent_dark"]),
+            ],
+            foreground=[("disabled", "#FFFFFF"), ("!disabled", "#FFFFFF")],
         )
-        style.configure("Secondary.TButton", font=("Microsoft YaHei UI", 10), padding=(13, 9), borderwidth=1)
+        style.configure(
+            "Secondary.TButton",
+            background="#ECECF0",
+            foreground=COLORS["text"],
+            borderwidth=0,
+            padding=(13, 9),
+            font=("Microsoft YaHei UI", 9),
+        )
         style.map(
             "Secondary.TButton",
-            background=[("disabled", "#f2f5f9"), ("active", "#eef4ff"), ("!disabled", "#ffffff")],
-            foreground=[("disabled", "#a2adbd"), ("!disabled", "#303848")],
+            background=[
+                ("disabled", "#EEF2F0"),
+                ("active", COLORS["surface_hover"]),
+                ("!disabled", "#EDF3F0"),
+            ],
+            foreground=[("disabled", "#A1ADA7"), ("!disabled", COLORS["text"])],
         )
-        style.configure("TCombobox", padding=(10, 7), fieldbackground="#ffffff", background="#ffffff", foreground="#172033", bordercolor="#d8dee8", arrowcolor="#6e7788")
-        style.map("TCombobox", fieldbackground=[("readonly", "#ffffff")], bordercolor=[("focus", "#2f6bff")])
-        style.configure("TEntry", padding=(10, 8), fieldbackground="#ffffff", foreground="#172033", bordercolor="#d8dee8")
-        style.map("TEntry", bordercolor=[("focus", "#2f6bff")])
-        style.configure("TRadiobutton", background="#ffffff", foreground="#303848", font=("Microsoft YaHei UI", 10))
-        style.map("TRadiobutton", foreground=[("disabled", "#a2adbd"), ("!disabled", "#303848")])
-        style.configure("Horizontal.TProgressbar", troughcolor="#e7edf5", background="#2f6bff", bordercolor="#e7edf5", lightcolor="#2f6bff", darkcolor="#2f6bff")
+        style.configure(
+            "TCombobox",
+            padding=(11, 8),
+            fieldbackground=COLORS["surface"],
+            background=COLORS["surface"],
+            foreground=COLORS["text"],
+            bordercolor=COLORS["border"],
+            arrowcolor=COLORS["text_secondary"],
+            lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[
+                ("readonly", COLORS["surface"]),
+                ("disabled", "#EEF2F0"),
+            ],
+            bordercolor=[("focus", COLORS["selection"])],
+            foreground=[("disabled", "#A1ADA7")],
+        )
+        style.configure(
+            "TEntry",
+            padding=(11, 8),
+            fieldbackground=COLORS["surface"],
+            foreground=COLORS["text"],
+            bordercolor=COLORS["border"],
+            lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"],
+        )
+        style.map(
+            "TEntry",
+            bordercolor=[("focus", COLORS["selection"])],
+            fieldbackground=[("disabled", "#EEF2F0")],
+        )
+        style.layout(
+            "Platform.TRadiobutton",
+            [
+                (
+                    "Radiobutton.padding",
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            (
+                                "Radiobutton.focus",
+                                {
+                                    "sticky": "nswe",
+                                    "children": [
+                                        ("Radiobutton.label", {"sticky": "nswe"})
+                                    ],
+                                },
+                            )
+                        ],
+                    },
+                )
+            ],
+        )
+        style.configure(
+            "Platform.TRadiobutton",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_secondary"],
+            borderwidth=0,
+            padding=(11, 10),
+            anchor="center",
+            focuscolor=COLORS["selection_focus"],
+            focusthickness=2,
+            focussolid=True,
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map(
+            "Platform.TRadiobutton",
+            background=[
+                ("selected", COLORS["selection"]),
+                ("focus", COLORS["selection_hover_soft"]),
+                ("active", COLORS["selection_hover_soft"]),
+                ("!selected", COLORS["surface_subtle"]),
+            ],
+            foreground=[
+                ("disabled", "#AEAEB2"),
+                ("selected", COLORS["selection_text"]),
+                ("!selected", COLORS["text_secondary"]),
+            ],
+            focuscolor=[
+                ("selected", COLORS["selection"]),
+                ("!selected", COLORS["selection_hover_soft"]),
+            ],
+        )
+        style.layout(
+            "Mode.TRadiobutton",
+            [
+                (
+                    "Radiobutton.padding",
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            (
+                                "Radiobutton.focus",
+                                {
+                                    "sticky": "nswe",
+                                    "children": [
+                                        ("Radiobutton.label", {"sticky": "nswe"})
+                                    ],
+                                },
+                            )
+                        ],
+                    },
+                )
+            ],
+        )
+        style.configure(
+            "Mode.TRadiobutton",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_secondary"],
+            padding=(12, 8),
+            anchor="center",
+            focuscolor=COLORS["selection"],
+            focusthickness=2,
+            focussolid=True,
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map(
+            "Mode.TRadiobutton",
+            background=[
+                ("selected", COLORS["accent_soft"]),
+                ("focus", COLORS["surface_hover"]),
+                ("active", COLORS["surface_hover"]),
+                ("!selected", COLORS["surface_subtle"]),
+            ],
+            foreground=[
+                ("disabled", "#A1ADA7"),
+                ("selected", COLORS["accent_dark"]),
+                ("!selected", COLORS["text_secondary"]),
+            ],
+            focuscolor=[
+                ("selected", COLORS["accent_soft"]),
+                ("!selected", COLORS["surface_hover"]),
+            ],
+        )
+        style.configure(
+            "Horizontal.TProgressbar",
+            troughcolor=COLORS["divider"],
+            background=COLORS["selection"],
+            bordercolor=COLORS["divider"],
+            lightcolor=COLORS["selection"],
+            darkcolor=COLORS["selection"],
+            thickness=7,
+        )
+        style.configure(
+            "Minimal.Vertical.TScrollbar",
+            gripcount=0,
+            background="#B7C8BF",
+            troughcolor=COLORS["background"],
+            bordercolor=COLORS["background"],
+            lightcolor="#B7C8BF",
+            darkcolor="#B7C8BF",
+            arrowcolor=COLORS["background"],
+            width=9,
+        )
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        self.scroll_canvas = tk.Canvas(self, bg="#f6f8fb", highlightthickness=0, borderwidth=0)
-        self.page_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.scroll_canvas.yview)
+        self.scroll_canvas = tk.Canvas(
+            self,
+            bg=COLORS["background"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.page_scrollbar = ttk.Scrollbar(
+            self,
+            orient="vertical",
+            command=self.scroll_canvas.yview,
+            style="Minimal.Vertical.TScrollbar",
+        )
         self.scroll_canvas.configure(yscrollcommand=self.page_scrollbar.set)
         self.scroll_canvas.grid(row=0, column=0, sticky="nsew")
         self.page_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -141,67 +1089,255 @@ class UnifiedDownloaderApp(tk.Tk):
         self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
         self.bind_all("<MouseWheel>", self._on_mousewheel)
         page.columnconfigure(0, weight=1)
+        page.columnconfigure(1, weight=1)
 
-        header = ttk.Frame(page, style="Topbar.TFrame", padding=(28, 20, 28, 12))
-        header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(0, weight=1)
-        header.columnconfigure(1, weight=0)
-        ttk.Label(header, text="融合下载器", style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="选择来源，粘贴内容，开始下载。支持抖音、小红书、Bilibili、YouTube 与 TikTok。", style="Subtitle.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.open_output_button = ttk.Button(header, text="打开输出文件夹", style="Secondary.TButton", command=self.open_output_dir)
-        self.open_output_button.grid(row=0, column=1, rowspan=2, sticky="e")
+        nav = ttk.Frame(page, style="Root.TFrame", padding=(32, 18, 32, 14))
+        nav.grid(row=0, column=0, columnspan=2, sticky="ew")
+        nav.columnconfigure(0, weight=1)
+        brand = ttk.Frame(nav, style="Root.TFrame")
+        brand.grid(row=0, column=0, sticky="w")
+        ttk.Label(brand, text="融合下载器", style="NavTitle.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        ttk.Label(brand, text="多平台媒体下载工作台", style="NavSubtitle.TLabel").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(2, 0),
+        )
+        nav_actions = ttk.Frame(nav, style="Root.TFrame")
+        nav_actions.grid(row=0, column=1, sticky="e")
+        self.choose_output_button = PillButton(
+            nav_actions,
+            text="更改位置",
+            command=self.choose_output_parent,
+            canvas_bg=COLORS["background"],
+            min_width=96,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.choose_output_button.grid(row=0, column=0, sticky="e", padx=(0, 8))
+        self.open_output_button = PillButton(
+            nav_actions,
+            text="打开下载结果",
+            command=self.open_output_dir,
+            canvas_bg=COLORS["background"],
+            min_width=116,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.open_output_button.grid(row=0, column=1, sticky="e")
 
-        input_panel = ttk.Frame(page, style="Panel.TFrame", padding=(24, 20, 24, 20))
-        input_panel.grid(row=1, column=0, sticky="ew", padx=28, pady=(4, 14))
+        self.hero_banner = HeroBanner(page)
+        self.hero_banner.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=32,
+            pady=(0, 18),
+        )
+
+        self.input_card = RoundedCard(
+            page,
+            canvas_bg=COLORS["background"],
+            fill=COLORS["surface"],
+            radius=24,
+            outline=COLORS["border"],
+            inset=24,
+        )
+        input_panel = self.input_card.body
         input_panel.columnconfigure(0, weight=1)
 
-        ttk.Label(input_panel, text="任务设置", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
-        selectors = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        selectors.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        for column in (1, 3, 5):
-            selectors.columnconfigure(column, weight=1)
-        ttk.Label(selectors, text="平台", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
-        self.platform_combo = ttk.Combobox(selectors, textvariable=self.platform_var, state="readonly", values=("抖音", "小红书", "Bilibili", "YouTube", "TikTok"), width=12)
-        self.platform_combo.grid(row=0, column=1, padx=(8, 18), sticky="ew")
-        self.platform_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_platform_change())
+        task_header = ttk.Frame(input_panel, style="Surface.TFrame")
+        task_header.grid(row=0, column=0, sticky="ew")
+        task_header.columnconfigure(0, weight=1)
+        ttk.Label(task_header, text="创建下载任务", style="SectionTitle.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
 
-        ttk.Label(selectors, text="功能", style="Muted.TLabel").grid(row=0, column=2, sticky="w")
-        self.feature_combo = ttk.Combobox(selectors, textvariable=self.feature_var, state="readonly", values=DOUYIN_FEATURES, width=20)
-        self.feature_combo.grid(row=0, column=3, padx=(8, 18), sticky="ew")
+        ttk.Label(input_panel, text="选择平台", style="PanelTitle.TLabel").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(18, 0),
+        )
+        platform_strip = ttk.Frame(
+            input_panel,
+            style="Bento.TFrame",
+            padding=(5, 5, 5, 5),
+        )
+        platform_strip.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        platforms = ("抖音", "小红书", "Bilibili", "YouTube", "TikTok")
+        for index, platform in enumerate(platforms):
+            platform_strip.columnconfigure(index, weight=1, uniform="platform")
+            button = ttk.Radiobutton(
+                platform_strip,
+                text=platform,
+                variable=self.platform_var,
+                value=platform,
+                style="Platform.TRadiobutton",
+                command=self._on_platform_change,
+                takefocus=True,
+            )
+            button.grid(
+                row=0,
+                column=index,
+                sticky="ew",
+                padx=(0 if index == 0 else 2, 0),
+            )
+            self.platform_buttons.append(button)
+        self.platform_combo = ttk.Combobox(
+            input_panel,
+            textvariable=self.platform_var,
+            state="readonly",
+            values=platforms,
+        )
+
+        options = ttk.Frame(input_panel, style="Surface.TFrame")
+        options.grid(row=3, column=0, sticky="ew", pady=(18, 0))
+        options.rowconfigure(0, weight=1)
+        for column in range(3):
+            options.columnconfigure(column, weight=1, uniform="option")
+        feature_group = ttk.Frame(
+            options,
+            style="Bento.TFrame",
+            padding=(14, 12, 14, 12),
+        )
+        feature_group.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        feature_group.columnconfigure(0, weight=1)
+        ttk.Label(feature_group, text="下载内容", style="BentoMuted.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        self.feature_combo = ttk.Combobox(
+            feature_group,
+            textvariable=self.feature_var,
+            state="readonly",
+            values=DOUYIN_FEATURES,
+            width=18,
+        )
+        self.feature_combo.grid(row=1, column=0, sticky="ew", pady=(7, 0))
         self.feature_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_feature_change())
 
-        ttk.Label(selectors, text="模式", style="Muted.TLabel").grid(row=0, column=4, sticky="w")
-        mode_frame = ttk.Frame(selectors, style="PanelInner.TFrame")
-        mode_frame.grid(row=0, column=5, sticky="ew", padx=(8, 0))
-        self.mode_batch_radio = ttk.Radiobutton(mode_frame, text="批量", variable=self.run_mode_var, value="批量", command=self._mark_mode_manual)
-        self.mode_batch_radio.grid(row=0, column=0, sticky="w")
-        self.mode_single_radio = ttk.Radiobutton(mode_frame, text="单个", variable=self.run_mode_var, value="单个", command=self._mark_mode_manual)
-        self.mode_single_radio.grid(row=0, column=1, sticky="w", padx=(14, 0))
+        mode_group = ttk.Frame(
+            options,
+            style="Bento.TFrame",
+            padding=(14, 12, 14, 12),
+        )
+        mode_group.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
+        mode_group.columnconfigure(0, weight=1)
+        ttk.Label(mode_group, text="任务模式", style="BentoMuted.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        mode_frame = ttk.Frame(mode_group, style="Soft.TFrame", padding=(3, 3, 3, 3))
+        mode_frame.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        mode_frame.columnconfigure(0, weight=1, uniform="mode")
+        mode_frame.columnconfigure(1, weight=1, uniform="mode")
+        self.mode_single_radio = ttk.Radiobutton(
+            mode_frame,
+            text="单个",
+            variable=self.run_mode_var,
+            value="单个",
+            command=self._mark_mode_manual,
+            style="Mode.TRadiobutton",
+        )
+        self.mode_single_radio.grid(row=0, column=0, sticky="ew")
+        self.mode_batch_radio = ttk.Radiobutton(
+            mode_frame,
+            text="批量",
+            variable=self.run_mode_var,
+            value="批量",
+            command=self._mark_mode_manual,
+            style="Mode.TRadiobutton",
+        )
+        self.mode_batch_radio.grid(row=0, column=1, sticky="ew", padx=(2, 0))
 
-        collection_bar = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        collection_bar.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        collection_bar.columnconfigure(1, weight=1)
-        self.collection_label_widget = ttk.Label(collection_bar, text="收藏夹", style="Muted.TLabel")
+        cover_group = ttk.Frame(
+            options,
+            style="Bento.TFrame",
+            padding=(14, 12, 14, 12),
+        )
+        cover_group.grid(row=0, column=2, sticky="nsew")
+        ttk.Label(cover_group, text="封面设置", style="BentoMuted.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        self.download_cover_check = CheckmarkToggle(
+            cover_group,
+            text="同时保存最高质量作品封面",
+            variable=self.download_cover_var,
+            canvas_bg=COLORS["surface_subtle"],
+        )
+        self.download_cover_check.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.cover_only_check = CheckmarkToggle(
+            cover_group,
+            text="仅下载最高质量作品封面",
+            variable=self.cover_only_var,
+            command=self._on_cover_only_change,
+            canvas_bg=COLORS["surface_subtle"],
+        )
+        self.cover_only_check.grid(row=2, column=0, sticky="w", pady=(4, 0))
+
+        self.collection_bar = ttk.Frame(
+            input_panel,
+            style="Bento.TFrame",
+            padding=(14, 12, 14, 12),
+        )
+        self.collection_bar.grid(row=4, column=0, sticky="ew", pady=(14, 0))
+        self.collection_bar.columnconfigure(1, weight=1)
+        self.collection_label_widget = ttk.Label(
+            self.collection_bar,
+            text="收藏夹",
+            style="BentoMuted.TLabel",
+        )
         self.collection_label_widget.grid(row=0, column=0, sticky="w")
-        self.collection_combo = ttk.Combobox(collection_bar, textvariable=self.collection_var, state="readonly", values=(), width=32)
+        self.collection_combo = ttk.Combobox(
+            self.collection_bar,
+            textvariable=self.collection_var,
+            state="readonly",
+            values=(),
+            width=26,
+        )
         self.collection_combo.grid(row=0, column=1, padx=(8, 10), sticky="ew")
         self.collection_combo.bind("<<ComboboxSelected>>", lambda _event: self._select_collection())
-        self.refresh_collections_button = ttk.Button(collection_bar, text="刷新收藏夹列表", style="Secondary.TButton", command=self.refresh_collections)
+        self.refresh_collections_button = ttk.Button(
+            self.collection_bar,
+            text="刷新收藏夹列表",
+            style="SoftLink.TButton",
+            command=self.refresh_collections,
+        )
         self.refresh_collections_button.grid(row=0, column=2, sticky="w")
 
-        advanced_header = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        advanced_header.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        advanced_header = ttk.Frame(input_panel, style="Surface.TFrame")
+        advanced_header.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         advanced_header.columnconfigure(0, weight=1)
-        self.download_cover_check = ttk.Checkbutton(
+        ttk.Label(
             advanced_header,
-            text="同时获取最高质量作品封面",
-            variable=self.download_cover_var,
+            text="保留默认设置即可获得推荐下载体验。",
+            style="Hint.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.advanced_button = ttk.Button(
+            advanced_header,
+            text="显示高级设置",
+            style="Link.TButton",
+            command=self.toggle_advanced,
         )
-        self.download_cover_check.grid(row=0, column=0, sticky="w")
-        self.advanced_button = ttk.Button(advanced_header, text="高级设置 ▾", style="Secondary.TButton", command=self.toggle_advanced)
         self.advanced_button.grid(row=0, column=1, sticky="e")
 
-        self.advanced_frame = ttk.Frame(input_panel, style="Advanced.TFrame", padding=(16, 14, 16, 14))
+        self.advanced_frame = ttk.Frame(
+            input_panel,
+            style="Bento.TFrame",
+            padding=(16, 14, 16, 14),
+        )
         self.advanced_frame.columnconfigure(1, weight=1)
         self.advanced_frame.columnconfigure(3, weight=1)
         ttk.Label(self.advanced_frame, text="下载引擎", style="AdvancedMuted.TLabel").grid(row=0, column=0, sticky="w")
@@ -220,120 +1356,260 @@ class UnifiedDownloaderApp(tk.Tk):
         ttk.Label(self.advanced_frame, text="手动 ID", style="AdvancedMuted.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
         self.collection_id_entry = ttk.Entry(self.advanced_frame, textvariable=self.collection_id_var, width=24)
         self.collection_id_entry.grid(row=2, column=1, sticky="ew", padx=(8, 20), pady=(12, 0))
-        ttk.Label(self.advanced_frame, text="留空表示尽量全部；网络不稳时建议 balanced 或 stable。", style="AdvancedHint.TLabel").grid(row=2, column=2, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Label(
+            self.advanced_frame,
+            text="留空表示全部；网络不稳建议选 balanced 或 stable。",
+            style="AdvancedHint.TLabel",
+            justify="left",
+            wraplength=250,
+        ).grid(
+            row=2,
+            column=2,
+            columnspan=2,
+            sticky="w",
+            pady=(12, 0),
+        )
 
-        input_header = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        input_header.grid(row=5, column=0, sticky="ew", pady=(18, 0))
+        input_header = ttk.Frame(input_panel, style="Surface.TFrame")
+        input_header.grid(row=7, column=0, sticky="ew", pady=(20, 0))
         input_header.columnconfigure(1, weight=1)
         ttk.Label(input_header, text="输入链接 / 分享文案", style="PanelTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.detected_label = ttk.Label(input_header, text="已识别：0 条内容", style="Hint.TLabel")
         self.detected_label.grid(row=0, column=1, sticky="e")
         self.input_text = tk.Text(
             input_panel,
-            height=7,
+            height=4,
             wrap="word",
             font=("Microsoft YaHei UI", 10),
-            bg="#fbfcfe",
-            fg="#172033",
-            insertbackground="#2f6bff",
+            bg=COLORS["accent_pale"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["accent_dark"],
+            selectbackground=COLORS["accent_soft"],
+            selectforeground=COLORS["text"],
             relief="flat",
             padx=16,
             pady=14,
             highlightthickness=1,
-            highlightbackground="#d8dee8",
-            highlightcolor="#2f6bff",
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["selection"],
+            undo=True,
         )
-        self.input_text.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        self.input_text.grid(row=8, column=0, sticky="ew", pady=(8, 0))
         self.input_text.bind("<KeyRelease>", lambda _event: self._update_detected_count())
 
-        action_bar = ttk.Frame(input_panel, style="PanelInner.TFrame")
-        action_bar.grid(row=7, column=0, sticky="ew", pady=(16, 0))
-        action_bar.columnconfigure(0, weight=1)
-        action_bar.columnconfigure(1, weight=0)
-        self.login_status_label = ttk.Label(action_bar, text="登录状态：需要下载收藏内容时请先登录", style="Hint.TLabel")
-        self.login_status_label.grid(row=0, column=0, sticky="w")
-        controls = ttk.Frame(action_bar, style="PanelInner.TFrame")
-        controls.grid(row=0, column=1, sticky="e")
-        self.paste_button = ttk.Button(controls, text="粘贴", style="Secondary.TButton", command=self.paste_clipboard)
-        self.paste_button.grid(row=0, column=0, sticky="w")
-        self.clear_button = ttk.Button(controls, text="清空", style="Secondary.TButton", command=self.clear_all)
-        self.clear_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        self.login_douyin_button = ttk.Button(controls, text="登录抖音", style="Secondary.TButton", command=self.open_douyin_login)
-        self.login_douyin_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
-        self.login_xhs_button = ttk.Button(controls, text="登录小红书", style="Secondary.TButton", command=self.open_xhs_login)
-        self.login_xhs_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
-        self.login_bilibili_button = ttk.Button(controls, text="登录 Bilibili", style="Secondary.TButton", command=self.open_bilibili_login)
-        self.login_bilibili_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
-        self.login_youtube_button = ttk.Button(
-            controls,
-            text="YouTube 登录设置",
-            style="Secondary.TButton",
-            command=self.open_youtube_auth_settings,
+        input_tools = ttk.Frame(input_panel, style="Surface.TFrame")
+        input_tools.grid(row=9, column=0, sticky="ew", pady=(10, 0))
+        input_tools.columnconfigure(0, weight=1)
+        ttk.Label(
+            input_tools,
+            text="快捷键：Ctrl+L 定位输入框 · Ctrl+Enter 开始",
+            style="Hint.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.paste_button = PillButton(
+            input_tools,
+            text="粘贴",
+            command=self.paste_clipboard,
+            canvas_bg=COLORS["surface"],
+            min_width=72,
+            height=36,
+            font=("Microsoft YaHei UI", 9),
         )
-        self.login_youtube_button.grid(row=0, column=5, sticky="w", padx=(8, 0))
-        self.check_login_button = ttk.Button(controls, text="检查登录状态", style="Secondary.TButton", command=self.check_login_status)
-        self.check_login_button.grid(row=0, column=6, sticky="w", padx=(8, 0))
-        self.start_button = ttk.Button(controls, text="开始下载", style="Primary.TButton", command=self.start_from_mode)
-        self.start_button.grid(row=0, column=7, sticky="e", padx=(16, 0))
+        self.paste_button.grid(row=0, column=1, sticky="e")
+        self.clear_button = PillButton(
+            input_tools,
+            text="清空",
+            command=self.clear_all,
+            canvas_bg=COLORS["surface"],
+            min_width=72,
+            height=36,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.clear_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
-        self.status_panel = ttk.Frame(page, style="Panel.TFrame", padding=(24, 18, 24, 18))
+        self.login_status_label = ttk.Label(
+            input_panel,
+            text="登录状态：需要下载收藏内容时请先登录",
+            style="StatusPill.TLabel",
+            anchor="w",
+            justify="left",
+            wraplength=650,
+        )
+        self.login_status_label.grid(row=10, column=0, sticky="ew", pady=(14, 0))
+
+        action_bar = ttk.Frame(
+            input_panel,
+            style="Bento.TFrame",
+            padding=(12, 10, 12, 10),
+        )
+        action_bar.grid(row=11, column=0, sticky="ew", pady=(14, 0))
+        action_bar.columnconfigure(0, weight=1)
+        account_controls = ttk.Frame(action_bar, style="Soft.TFrame")
+        account_controls.grid(row=0, column=0, sticky="w")
+        self.login_douyin_button = PillButton(
+            account_controls,
+            text="登录抖音",
+            command=self.open_douyin_login,
+            canvas_bg=COLORS["surface_subtle"],
+            min_width=94,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.login_douyin_button.grid(row=0, column=0, sticky="w")
+        self.login_xhs_button = PillButton(
+            account_controls,
+            text="登录小红书",
+            command=self.open_xhs_login,
+            canvas_bg=COLORS["surface_subtle"],
+            min_width=104,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.login_xhs_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.login_bilibili_button = PillButton(
+            account_controls,
+            text="登录 Bilibili",
+            command=self.open_bilibili_login,
+            canvas_bg=COLORS["surface_subtle"],
+            min_width=112,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.login_bilibili_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.login_youtube_button = PillButton(
+            account_controls,
+            text="YouTube 登录设置",
+            command=self.open_youtube_auth_settings,
+            canvas_bg=COLORS["surface_subtle"],
+            min_width=136,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.login_youtube_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.check_login_button = PillButton(
+            account_controls,
+            text="检查登录状态",
+            command=self.check_login_status,
+            canvas_bg=COLORS["surface_subtle"],
+            min_width=112,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.check_login_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        self.start_button = PillButton(
+            action_bar,
+            text="开始下载",
+            command=self.start_from_mode,
+            variant="primary",
+            canvas_bg=COLORS["surface_subtle"],
+            min_width=148,
+            height=46,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        self.start_button.grid(row=0, column=1, sticky="e", padx=(18, 0))
+
+        self.status_card = RoundedCard(
+            page,
+            canvas_bg=COLORS["background"],
+            fill=COLORS["surface"],
+            radius=24,
+            outline=COLORS["border"],
+            inset=22,
+        )
+        self.status_panel = self.status_card.body
         status_panel = self.status_panel
-        status_panel.grid(row=2, column=0, sticky="nsew", padx=28, pady=(0, 18))
         status_panel.columnconfigure(0, weight=1)
-        status_panel.rowconfigure(4, weight=1, minsize=0)
-        feedback_header = ttk.Frame(status_panel, style="PanelInner.TFrame")
+        status_panel.rowconfigure(5, weight=1, minsize=220)
+        feedback_header = ttk.Frame(status_panel, style="Surface.TFrame")
         feedback_header.grid(row=0, column=0, sticky="ew")
         feedback_header.columnconfigure(0, weight=1)
-        ttk.Label(feedback_header, text="任务反馈", style="SectionTitle.TLabel").grid(row=0, column=0, sticky="w")
-        self.empty_state_label = ttk.Label(feedback_header, text="还没有任务，粘贴链接后点击开始下载。", style="Hint.TLabel")
-        self.empty_state_label.grid(row=0, column=1, sticky="e")
-        stats = ttk.Frame(status_panel, style="PanelInner.TFrame")
+        ttk.Label(feedback_header, text="任务动态", style="SectionTitle.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        self.empty_state_label = ttk.Label(
+            status_panel,
+            text="还没有任务，粘贴链接后点击开始下载。",
+            style="StatusPill.TLabel",
+            wraplength=280,
+            justify="left",
+        )
+        self.empty_state_label.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        stats = ttk.Frame(status_panel, style="Surface.TFrame")
         stats.grid(row=1, column=0, sticky="ew", pady=(14, 0))
-        for i in range(4):
-            stats.columnconfigure(i, weight=1)
+        stats.grid_configure(row=2)
+        for i in range(2):
+            stats.columnconfigure(i, weight=1, uniform="stat")
         self.total_value = self._stat_card(stats, 0, "总任务", "0")
         self.done_value = self._stat_card(stats, 1, "已完成", "0")
         self.success_value = self._stat_card(stats, 2, "成功", "0", "SuccessStatValue.TLabel")
         self.failed_value = self._stat_card(stats, 3, "失败", "0", "DangerStatValue.TLabel")
 
-        progress_line = ttk.Frame(status_panel, style="PanelInner.TFrame")
-        progress_line.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        progress_line = ttk.Frame(status_panel, style="Surface.TFrame")
+        progress_line.grid(row=3, column=0, sticky="ew", pady=(16, 0))
         progress_line.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_line, mode="determinate", maximum=100, value=0)
         self.progress.grid(row=0, column=0, sticky="ew")
         self.status_label = ttk.Label(progress_line, text="等待任务", style="Muted.TLabel")
         self.status_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
 
-        log_header = ttk.Frame(status_panel, style="PanelInner.TFrame")
-        log_header.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        log_header = ttk.Frame(status_panel, style="Surface.TFrame")
+        log_header.grid(row=4, column=0, sticky="ew", pady=(18, 0))
         log_header.columnconfigure(0, weight=1)
-        ttk.Label(log_header, text="运行日志", style="PanelTitle.TLabel").grid(row=0, column=0, sticky="w")
-        self.log_toggle_button = ttk.Button(log_header, text="展开日志 ▾", style="Secondary.TButton", command=self.toggle_log_panel)
+        ttk.Label(log_header, text="运行日志", style="PanelTitle.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        self.log_toggle_button = ttk.Button(
+            log_header,
+            text="隐藏运行日志",
+            style="Link.TButton",
+            command=self.toggle_log_panel,
+        )
         self.log_toggle_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
-        self.copy_failure_button = ttk.Button(log_header, text="复制失败摘要", style="Secondary.TButton", command=self.copy_failure_log)
-        self.copy_failure_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
-        self.copy_all_button = ttk.Button(log_header, text="复制完整日志", style="Secondary.TButton", command=self.copy_all_log)
-        self.copy_all_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
-        self.clear_log_button = ttk.Button(log_header, text="清空日志", style="Secondary.TButton", command=self.clear_log)
-        self.clear_log_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
+        log_actions = ttk.Frame(log_header, style="Surface.TFrame")
+        log_actions.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.copy_failure_button = ttk.Button(
+            log_actions,
+            text="复制失败摘要",
+            style="Link.TButton",
+            command=self.copy_failure_log,
+        )
+        self.copy_failure_button.grid(row=0, column=0, sticky="w")
+        self.copy_all_button = ttk.Button(
+            log_actions,
+            text="复制完整日志",
+            style="Link.TButton",
+            command=self.copy_all_log,
+        )
+        self.copy_all_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.clear_log_button = ttk.Button(
+            log_actions,
+            text="清空日志",
+            style="Link.TButton",
+            command=self.clear_log,
+        )
+        self.clear_log_button.grid(row=0, column=2, sticky="w", padx=(10, 0))
         self.log_box = scrolledtext.ScrolledText(
             status_panel,
             wrap="word",
             state="disabled",
             height=12,
             font=("Consolas", 10),
-            bg="#20242d",
-            fg="#eef2f8",
-            insertbackground="#2f6bff",
+            bg=COLORS["log"],
+            fg="#24352D",
+            insertbackground=COLORS["accent_dark"],
+            selectbackground=COLORS["accent_soft"],
+            selectforeground=COLORS["text"],
             relief="flat",
             padx=14,
             pady=12,
             highlightthickness=1,
-            highlightbackground="#303848",
-            highlightcolor="#435066",
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["selection"],
         )
-        self.log_box.grid(row=4, column=0, sticky="nsew", pady=(8, 0))
-        self.log_box.grid_remove()
+        self.log_box.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
         self.log_menu = tk.Menu(self, tearoff=0)
         self.log_menu.add_command(label="复制选中内容", command=lambda: self.log_box.event_generate("<<Copy>>"))
         self.log_menu.add_command(label="复制完整日志", command=self.copy_all_log)
@@ -343,23 +1619,94 @@ class UnifiedDownloaderApp(tk.Tk):
         self.log_box.bind("<Button-3>", self.show_log_menu)
         self.log_box.bind("<Control-a>", self.select_all_log)
 
-        footer = ttk.Frame(page, style="Root.TFrame", padding=(28, 0, 28, 14))
-        footer.grid(row=3, column=0, sticky="ew")
-        ttk.Label(footer, text=f"输出根目录：{OUTPUT_ROOT}", style="Subtitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.footer = ttk.Frame(page, style="Root.TFrame", padding=(34, 8, 34, 20))
+        self.footer.columnconfigure(0, weight=1)
+        self.output_path_label = ttk.Label(
+            self.footer,
+            text=f"下载保存到  {self.output_root}",
+            style="Subtitle.TLabel",
+            wraplength=700,
+        )
+        self.output_path_label.grid(row=0, column=0, sticky="w")
+        self._apply_responsive_layout(1180)
 
-    def _stat_card(self, parent: ttk.Frame, column: int, label: str, value: str, value_style: str = "StatValue.TLabel") -> ttk.Label:
-        card = ttk.Frame(parent, style="StatCard.TFrame", padding=(18, 10, 18, 10))
-        card.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 10, 0))
+    def _stat_card(
+        self,
+        parent: ttk.Frame,
+        index: int,
+        label: str,
+        value: str,
+        value_style: str = "StatValue.TLabel",
+    ) -> ttk.Label:
+        row = index // 2
+        column = index % 2
+        card = ttk.Frame(parent, style="Bento.TFrame", padding=(14, 12, 14, 12))
+        card.grid(
+            row=row,
+            column=column,
+            sticky="nsew",
+            padx=(0 if column == 0 else 8, 0),
+            pady=(0 if row == 0 else 8, 0),
+        )
         value_label = ttk.Label(card, text=value, style=value_style)
         value_label.grid(row=0, column=0, sticky="w")
         ttk.Label(card, text=label, style="StatLabel.TLabel").grid(row=1, column=0, sticky="w")
         return value_label
 
+    def _apply_responsive_layout(self, page_width: int) -> None:
+        wide = page_width >= 1120
+        if self._wide_layout == wide:
+            return
+        self._wide_layout = wide
+        if wide:
+            self.page_frame.columnconfigure(0, weight=5)
+            self.page_frame.columnconfigure(1, weight=3)
+            self.input_card.grid(
+                row=2,
+                column=0,
+                sticky="nsew",
+                padx=(32, 10),
+                pady=(0, 18),
+            )
+            self.status_card.grid(
+                row=2,
+                column=1,
+                sticky="nsew",
+                padx=(10, 32),
+                pady=(0, 18),
+            )
+            self.footer.grid(row=3, column=0, columnspan=2, sticky="ew")
+        else:
+            self.page_frame.columnconfigure(0, weight=1)
+            self.page_frame.columnconfigure(1, weight=0)
+            self.input_card.grid(
+                row=2,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+                padx=24,
+                pady=(0, 16),
+            )
+            self.status_card.grid(
+                row=3,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+                padx=24,
+                pady=(0, 16),
+            )
+            self.footer.grid(row=4, column=0, columnspan=2, sticky="ew")
+
     def _on_page_configure(self, _event: tk.Event | None = None) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
-        self.scroll_canvas.itemconfigure(self.page_window, width=event.width)
+        viewport_width = max(1, int(event.width))
+        page_width = min(viewport_width, 1320)
+        page_x = max(0, (viewport_width - page_width) // 2)
+        self.scroll_canvas.coords(self.page_window, page_x, 0)
+        self.scroll_canvas.itemconfigure(self.page_window, width=page_width)
+        self._apply_responsive_layout(page_width)
 
     def _on_mousewheel(self, event: tk.Event) -> str | None:
         if event.widget in (self.input_text, self.log_box):
@@ -391,24 +1738,24 @@ class UnifiedDownloaderApp(tk.Tk):
         visible = not self.advanced_visible.get()
         self.advanced_visible.set(visible)
         if visible:
-            self.advanced_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-            self.advanced_button.configure(text="高级设置 ▴")
+            self.advanced_frame.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+            self.advanced_button.configure(text="隐藏高级设置")
         else:
             self.advanced_frame.grid_remove()
-            self.advanced_button.configure(text="高级设置 ▾")
+            self.advanced_button.configure(text="显示高级设置")
 
     def toggle_log_panel(self) -> None:
         visible = not self.log_visible.get()
         self.log_visible.set(visible)
         if visible:
-            self.status_panel.rowconfigure(4, minsize=220)
+            self.status_panel.rowconfigure(5, minsize=220)
             self.log_box.grid()
-            self.log_toggle_button.configure(text="收起日志 ▴")
+            self.log_toggle_button.configure(text="隐藏运行日志")
             self.after_idle(lambda: self.scroll_canvas.yview_moveto(1.0))
         else:
-            self.status_panel.rowconfigure(4, minsize=0)
+            self.status_panel.rowconfigure(5, minsize=0)
             self.log_box.grid_remove()
-            self.log_toggle_button.configure(text="展开日志 ▾")
+            self.log_toggle_button.configure(text="显示运行日志")
 
     def _update_detected_count(self) -> None:
         if self.feature_var.get() in {"收藏夹", "收藏视频", "收藏作品"}:
@@ -501,8 +1848,10 @@ class UnifiedDownloaderApp(tk.Tk):
         self.collection_id_entry.configure(state=entry_state)
         self.refresh_collections_button.configure(state="normal" if is_collection and not self.is_running else "disabled")
         if is_collection:
+            self.collection_bar.grid()
             self.input_text.configure(state="disabled")
         else:
+            self.collection_bar.grid_remove()
             self.input_text.configure(state="normal")
         regular_state = "disabled" if is_media_only or self.is_running else "normal"
         combo_state = "disabled" if is_media_only or self.is_running else "readonly"
@@ -515,6 +1864,15 @@ class UnifiedDownloaderApp(tk.Tk):
         elif not self.is_running:
             self.mode_batch_radio.configure(state="normal")
         self._update_detected_count()
+
+    def _on_cover_only_change(self) -> None:
+        cover_only = self.cover_only_var.get()
+        if self.download_cover_check is not None:
+            self.download_cover_check.configure(
+                state="disabled" if cover_only or self.is_running else "normal"
+            )
+        if not self.is_running:
+            self.start_button.configure(text="下载封面" if cover_only else "开始下载")
 
     def paste_clipboard(self) -> None:
         try:
@@ -1054,14 +2412,24 @@ class UnifiedDownloaderApp(tk.Tk):
             messagebox.showwarning("提示", str(exc))
             return
 
-        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+        try:
+            options.output_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "无法创建下载目录",
+                f"无法在所选位置创建“{OUTPUT_DIR_NAME}”文件夹：\n{options.output_root}\n\n{exc}",
+            )
+            return
         self._set_buttons_state("disabled")
         self._reset_stats(total=1 if options.feature in {"收藏夹", "收藏视频", "收藏作品"} else len(options.inputs))
         self.empty_state_label.configure(text="任务运行中，请等待下载完成。")
-        cover_mode = "是" if options.download_cover else "否"
+        cover_mode = "仅下载封面" if options.cover_only else ("同时保存" if options.download_cover else "不保存")
         self._append_log(
-            f"开始任务：平台={options.platform}，功能={options.feature}，获取最高质量封面={cover_mode}\n"
+            f"开始任务：平台={options.platform}，功能={options.feature}，"
+            f"封面模式={cover_mode}\n输出位置：{options.output_root}\n"
         )
+        if options.cover_only:
+            self._append_log("仅封面模式已启用：本次不会下载视频、作品图片或评论内容。\n")
         self.worker = threading.Thread(target=self._run_worker, args=(options,), daemon=True)
         self.worker.start()
 
@@ -1085,18 +2453,20 @@ class UnifiedDownloaderApp(tk.Tk):
         elif not collection_id:
             raise ValueError("请先刷新并选择收藏夹，或手动输入收藏夹 ID。")
 
+        cover_only = self.cover_only_var.get()
         return TaskOptions(
             platform=platform,
             feature=feature,
             inputs=inputs,
-            output_root=OUTPUT_ROOT,
+            output_root=self.output_root,
             download_engine=self.engine_var.get(),
             max_workers=self._selected_workers(),
             comment_limit=parse_positive_int(self.comment_limit_var.get(), "评论图片数量"),
             collection_limit=parse_positive_int(self.collection_limit_var.get(), "收藏作品数量" if platform == "小红书" else "收藏夹作品数量"),
             collection_id=collection_id,
             collection_name=collection_name,
-            download_cover=self.download_cover_var.get(),
+            download_cover=self.download_cover_var.get() or cover_only,
+            cover_only=cover_only,
         )
 
     def _selected_workers(self) -> int:
@@ -1179,9 +2549,48 @@ class UnifiedDownloaderApp(tk.Tk):
         self.after(100, self._drain_log_queue)
 
     def open_output_dir(self) -> None:
-        target = Path(self.last_output_dir) if self.last_output_dir else OUTPUT_ROOT
-        target.mkdir(parents=True, exist_ok=True)
-        os.startfile(target)  # type: ignore[attr-defined]
+        target = Path(self.last_output_dir) if self.last_output_dir else self.output_root
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            os.startfile(target)  # type: ignore[attr-defined]
+        except OSError as exc:
+            messagebox.showerror("无法打开下载目录", f"无法打开：\n{target}\n\n{exc}")
+
+    def choose_output_parent(self) -> None:
+        if self.is_running:
+            return
+        selected = filedialog.askdirectory(
+            parent=self,
+            title=f"选择保存位置（将在其中创建“{OUTPUT_DIR_NAME}”文件夹）",
+            initialdir=str(self.output_parent),
+            mustexist=True,
+        )
+        if not selected:
+            return
+
+        parent = Path(selected).expanduser().resolve()
+        output_root = output_root_for_parent(parent)
+        try:
+            output_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "无法使用所选位置",
+                f"无法在所选位置创建“{OUTPUT_DIR_NAME}”文件夹：\n{output_root}\n\n{exc}",
+            )
+            return
+
+        self.output_parent = parent
+        self.output_root = output_root
+        self.last_output_dir = None
+        self.output_path_label.configure(text=f"下载保存到  {self.output_root}")
+        self._append_log(f"输出位置已更改：{self.output_root}\n")
+        try:
+            save_output_parent(parent)
+        except OSError as exc:
+            messagebox.showwarning(
+                "位置已更改",
+                f"本次会话将使用所选位置，但无法保存该设置：\n{exc}",
+            )
 
     def _reset_stats(self, total: int = 0) -> None:
         self.total_tasks = total
@@ -1203,9 +2612,22 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _set_buttons_state(self, state: str) -> None:
         readonly = "readonly" if state == "normal" else "disabled"
-        self.start_button.configure(state=state)
+        self.start_button.configure(
+            state=state,
+            text=(
+                "下载封面"
+                if state == "normal" and self.cover_only_var.get()
+                else "开始下载"
+                if state == "normal"
+                else "正在下载封面…"
+                if self.cover_only_var.get()
+                else "正在下载…"
+            ),
+        )
         self.mode_batch_radio.configure(state=state)
         self.mode_single_radio.configure(state=state)
+        for button in self.platform_buttons:
+            button.configure(state=state)
         self.platform_combo.configure(state=readonly)
         self.feature_combo.configure(state=readonly)
         self.engine_combo.configure(state=readonly)
@@ -1213,6 +2635,8 @@ class UnifiedDownloaderApp(tk.Tk):
         self.advanced_button.configure(state=state)
         if self.download_cover_check is not None:
             self.download_cover_check.configure(state=state)
+        if self.cover_only_check is not None:
+            self.cover_only_check.configure(state=state)
         self.comment_limit_entry.configure(state=state)
         self.collection_limit_entry.configure(state=state)
         for button in (
@@ -1228,10 +2652,19 @@ class UnifiedDownloaderApp(tk.Tk):
                 button.configure(state=state)
         if self.open_output_button is not None:
             self.open_output_button.configure(state="normal")
+        if self.choose_output_button is not None:
+            self.choose_output_button.configure(state=state)
         for button in (self.copy_failure_button, self.copy_all_button, self.clear_log_button):
             if button is not None:
                 button.configure(state="normal")
         self._on_feature_change()
+        if state == "normal":
+            self._on_cover_only_change()
+        else:
+            if self.download_cover_check is not None:
+                self.download_cover_check.configure(state="disabled")
+            if self.cover_only_check is not None:
+                self.cover_only_check.configure(state="disabled")
 
     def _append_log(self, text: str) -> None:
         self.log_box.configure(state="normal")

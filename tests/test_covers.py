@@ -195,6 +195,177 @@ class PlatformCoverAdapterTests(unittest.TestCase):
         self.assertTrue(callable(tiktok.download_cover_from_info))
 
 
+class CoverOnlyPlatformTests(unittest.TestCase):
+    def test_douyin_cover_only_returns_before_media_engine(self) -> None:
+        url = "https://www.douyin.com/video/7666007676588920091"
+        cover = {
+            "path": "cover.jpg",
+            "filename": "cover.jpg",
+            "resolution": "1080x1920",
+        }
+        with patch(
+            "downloaders.douyin.make_session",
+            return_value=MagicMock(),
+        ), patch(
+            "downloaders.douyin.fetch_page",
+            return_value=("<html></html>", url),
+        ), patch(
+            "downloaders.douyin.find_aweme",
+            return_value={"aweme_id": "7666007676588920091"},
+        ), patch(
+            "downloaders.douyin.extract_images",
+            return_value=[],
+        ), patch(
+            "downloaders.douyin.extract_videos",
+            return_value=[{"url": "https://cdn.example/video.mp4"}],
+        ), patch(
+            "downloaders.douyin.extract_browser_video_streams",
+        ) as browser_streams, patch(
+            "downloaders.douyin.download_cover_from_aweme",
+            return_value=cover,
+        ), patch(
+            "downloaders.douyin.make_download_engine",
+        ) as media_engine, tempfile.TemporaryDirectory() as temp_name:
+            report = douyin.download_note(url, temp_name, cover_only=True)
+
+        self.assertEqual(report["kind"], "cover")
+        browser_streams.assert_not_called()
+        media_engine.assert_not_called()
+
+    def test_xhs_cover_only_returns_before_media_engine(self) -> None:
+        url = "https://www.xiaohongshu.com/discovery/item/6a5ccd970000000014005241"
+        image = MagicMock()
+        cover = {
+            "path": "cover.jpg",
+            "filename": "cover.jpg",
+            "resolution": "2112x2816",
+        }
+        with patch(
+            "downloaders.xiaohongshu.make_session",
+            return_value=MagicMock(),
+        ), patch(
+            "downloaders.xiaohongshu.fetch_note_html",
+            return_value=("<html></html>", url),
+        ), patch(
+            "downloaders.xiaohongshu.parse_initial_state",
+            return_value={},
+        ), patch(
+            "downloaders.xiaohongshu.find_note",
+            return_value=(
+                "6a5ccd970000000014005241",
+                {"user": {"nickname": "作者"}, "title": "示例"},
+            ),
+        ), patch(
+            "downloaders.xiaohongshu.extract_images",
+            return_value=[image],
+        ), patch(
+            "downloaders.xiaohongshu.extract_note_videos",
+            return_value=[{"url": "https://cdn.example/video.mp4"}],
+        ), patch(
+            "downloaders.xiaohongshu.extract_browser_video_streams",
+        ) as browser_streams, patch(
+            "downloaders.xiaohongshu.download_cover_from_note",
+            return_value=cover,
+        ), patch(
+            "downloaders.xiaohongshu.make_download_engine",
+        ) as media_engine, tempfile.TemporaryDirectory() as temp_name:
+            report = xiaohongshu.download_note(url, temp_name, cover_only=True)
+
+        self.assertEqual(report["kind"], "cover")
+        browser_streams.assert_not_called()
+        media_engine.assert_not_called()
+
+    def test_youtube_cover_only_extracts_metadata_without_media_download(self) -> None:
+        info = {
+            "id": "7xTGNNLPyMI",
+            "title": "示例",
+            "uploader": "作者",
+            "webpage_url": "https://youtu.be/7xTGNNLPyMI",
+        }
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.extract_info.return_value = info
+        with tempfile.TemporaryDirectory() as temp_name, patch(
+            "downloaders.youtube.YoutubeDL",
+            return_value=ydl,
+        ), patch(
+            "downloaders.youtube.find_executable",
+            return_value=None,
+        ), patch(
+            "downloaders.youtube.download_cover_from_info",
+            return_value={
+                "path": str(Path(temp_name) / "cover.jpg"),
+                "filename": "cover.jpg",
+                "resolution": "1280x720",
+            },
+        ):
+            report = youtube.download_cover_only(
+                info["webpage_url"],
+                Path(temp_name),
+                auth_context={"mode": "anonymous"},
+            )
+
+        ydl.extract_info.assert_called_once_with(info["webpage_url"], download=False)
+        self.assertEqual(report["kind"], "cover")
+        self.assertEqual(report["output_path"], str(Path(temp_name) / "cover.jpg"))
+
+    def test_bilibili_cover_only_extracts_metadata_without_media_download(self) -> None:
+        url = "https://www.bilibili.com/video/BV16cNEeXEer/"
+        info = {
+            "id": "BV16cNEeXEer",
+            "title": "示例",
+            "uploader": "作者",
+            "webpage_url": url,
+        }
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.extract_info.return_value = info
+        with tempfile.TemporaryDirectory() as temp_name, patch(
+            "downloaders.bilibili.YoutubeDL",
+            return_value=ydl,
+        ), patch(
+            "downloaders.bilibili.load_bilibili_cookies",
+        ), patch(
+            "downloaders.bilibili.download_cover_from_info",
+            return_value={
+                "path": str(Path(temp_name) / "cover.jpg"),
+                "filename": "cover.jpg",
+                "resolution": "1414x900",
+            },
+        ):
+            report = bilibili.download_cover_only(url, Path(temp_name))
+
+        ydl.extract_info.assert_called_once_with(url, download=False)
+        self.assertEqual(report["kind"], "cover")
+
+    def test_tiktok_cover_only_extracts_metadata_without_media_download(self) -> None:
+        url = "https://www.tiktok.com/@demo/video/7648229711117569293"
+        info = {
+            "id": "7648229711117569293",
+            "title": "示例",
+            "uploader": "作者",
+            "webpage_url": url,
+        }
+        ydl = MagicMock()
+        ydl.__enter__.return_value = ydl
+        ydl.extract_info.return_value = info
+        with tempfile.TemporaryDirectory() as temp_name, patch(
+            "downloaders.tiktok.YoutubeDL",
+            return_value=ydl,
+        ), patch(
+            "downloaders.tiktok.download_cover_from_info",
+            return_value={
+                "path": str(Path(temp_name) / "cover.jpg"),
+                "filename": "cover.jpg",
+                "resolution": "540x960",
+            },
+        ):
+            report = tiktok.download_cover_only(url, Path(temp_name))
+
+        ydl.extract_info.assert_called_once_with(url, download=False)
+        self.assertEqual(report["kind"], "cover")
+
+
 class CoverDispatchTests(unittest.TestCase):
     @patch("services.task_runner.youtube.read_youtube_auth_context")
     @patch("services.task_runner.youtube.download_video")
@@ -300,6 +471,160 @@ class CoverDispatchTests(unittest.TestCase):
             )
         self.assertEqual(report["failures"], [])
         self.assertEqual(report["cover_failures"][0]["error"], "封面受限")
+
+    def test_youtube_cover_only_dispatch_never_calls_media_download(self) -> None:
+        with patch(
+            "services.task_runner.youtube.read_youtube_auth_context",
+            return_value={"mode": "anonymous"},
+        ), patch(
+            "services.task_runner.youtube.download_cover_only",
+            return_value={"kind": "cover", "cover": {"status": "ok"}},
+        ) as download_only, patch(
+            "services.task_runner.youtube.download_video",
+        ) as download_media, tempfile.TemporaryDirectory() as temp_name:
+            report = run_task(
+                TaskOptions(
+                    platform="YouTube",
+                    feature="视频媒体",
+                    inputs=["https://youtu.be/7xTGNNLPyMI"],
+                    output_root=Path(temp_name),
+                    cover_only=True,
+                ),
+                log=lambda _message: None,
+            )
+
+        self.assertEqual(report["failures"], [])
+        download_only.assert_called_once()
+        download_media.assert_not_called()
+
+    def test_bilibili_cover_only_dispatch_never_calls_media_download(self) -> None:
+        with patch(
+            "services.task_runner.bilibili.read_bilibili_login_context",
+            return_value={"cookie": "", "logged_in": False, "vip": False},
+        ), patch(
+            "services.task_runner.bilibili.download_cover_only",
+            return_value={"kind": "cover", "cover": {"status": "ok"}},
+        ) as download_only, patch(
+            "services.task_runner.bilibili.download_video",
+        ) as download_media, tempfile.TemporaryDirectory() as temp_name:
+            report = run_task(
+                TaskOptions(
+                    platform="Bilibili",
+                    feature="视频媒体",
+                    inputs=["https://www.bilibili.com/video/BV16cNEeXEer/"],
+                    output_root=Path(temp_name),
+                    cover_only=True,
+                ),
+                log=lambda _message: None,
+            )
+
+        self.assertEqual(report["failures"], [])
+        download_only.assert_called_once()
+        download_media.assert_not_called()
+
+    def test_tiktok_cover_only_dispatch_never_calls_media_download(self) -> None:
+        with patch(
+            "services.task_runner.tiktok.download_cover_only",
+            return_value={"kind": "cover", "cover": {"status": "ok"}},
+        ) as download_only, patch(
+            "services.task_runner.tiktok.download_video",
+        ) as download_media, tempfile.TemporaryDirectory() as temp_name:
+            report = run_task(
+                TaskOptions(
+                    platform="TikTok",
+                    feature="视频媒体",
+                    inputs=["https://www.tiktok.com/@demo/video/7648229711117569293"],
+                    output_root=Path(temp_name),
+                    cover_only=True,
+                ),
+                log=lambda _message: None,
+            )
+
+        self.assertEqual(report["failures"], [])
+        download_only.assert_called_once()
+        download_media.assert_not_called()
+
+    def test_douyin_cover_only_overrides_comment_download(self) -> None:
+        with patch(
+            "services.task_runner.douyin.download_note",
+            return_value={"kind": "cover", "cover": {"status": "ok"}},
+        ) as download_only, patch(
+            "services.task_runner.douyin.download_comment_images",
+        ) as download_comments, tempfile.TemporaryDirectory() as temp_name:
+            report = run_task(
+                TaskOptions(
+                    platform="抖音",
+                    feature="评论区图片",
+                    inputs=["https://v.douyin.com/example/"],
+                    output_root=Path(temp_name),
+                    cover_only=True,
+                ),
+                log=lambda _message: None,
+            )
+
+        self.assertEqual(report["failures"], [])
+        self.assertTrue(download_only.call_args.kwargs["cover_only"])
+        download_comments.assert_not_called()
+
+    def test_xhs_cover_only_overrides_comment_download(self) -> None:
+        with patch(
+            "services.task_runner.xiaohongshu.download_note",
+            return_value={"kind": "cover", "cover": {"status": "ok"}},
+        ) as download_only, patch(
+            "services.task_runner.xiaohongshu.download_comment_images",
+        ) as download_comments, tempfile.TemporaryDirectory() as temp_name:
+            report = run_task(
+                TaskOptions(
+                    platform="小红书",
+                    feature="评论区图片",
+                    inputs=["https://www.xiaohongshu.com/discovery/item/6a5ccd970000000014005241"],
+                    output_root=Path(temp_name),
+                    cover_only=True,
+                ),
+                log=lambda _message: None,
+            )
+
+        self.assertEqual(report["failures"], [])
+        self.assertTrue(download_only.call_args.kwargs["cover_only"])
+        download_comments.assert_not_called()
+
+    def test_collection_cover_only_is_forwarded(self) -> None:
+        with patch(
+            "services.task_runner.download_collection",
+            return_value={"items": [], "failures": [], "output_dir": "out"},
+        ) as douyin_collection, tempfile.TemporaryDirectory() as temp_name:
+            run_task(
+                TaskOptions(
+                    platform="抖音",
+                    feature="收藏夹",
+                    inputs=[],
+                    output_root=Path(temp_name),
+                    collection_id="123",
+                    collection_name="收藏",
+                    cover_only=True,
+                ),
+                log=lambda _message: None,
+            )
+        self.assertTrue(douyin_collection.call_args.kwargs["cover_only"])
+        self.assertTrue(douyin_collection.call_args.kwargs["download_cover"])
+        with patch(
+            "services.task_runner.xiaohongshu.download_collection",
+            return_value={"items": [], "failures": [], "output_dir": "out"},
+        ) as xhs_collection, tempfile.TemporaryDirectory() as temp_name:
+            run_task(
+                TaskOptions(
+                    platform="小红书",
+                    feature="收藏作品",
+                    inputs=[],
+                    output_root=Path(temp_name),
+                    collection_id="__all_favorites__",
+                    collection_name="全部收藏作品",
+                    cover_only=True,
+                ),
+                log=lambda _message: None,
+            )
+        self.assertTrue(xhs_collection.call_args.kwargs["cover_only"])
+        self.assertTrue(xhs_collection.call_args.kwargs["download_cover"])
 
     def _run_single(
         self,

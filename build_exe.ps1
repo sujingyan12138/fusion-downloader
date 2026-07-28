@@ -19,6 +19,13 @@ $argsList = @(
     "--name", $exeName
 )
 
+$icon = Join-Path $PSScriptRoot "favicon.ico"
+if (-not (Test-Path -LiteralPath $icon)) {
+    throw "favicon.ico was not found. Packaging stopped because the application icon is required."
+}
+$argsList += @("--icon", $icon)
+$argsList += @("--add-data", "$icon;.")
+
 $argsList += @("--collect-all", "yt_dlp")
 $argsList += @("--collect-all", "yt_dlp_ejs")
 $argsList += @("--collect-all", "curl_cffi")

@@ -174,6 +174,7 @@ def download_note(
     use_idm: bool | str = "smart",
     video_only: bool = False,
     download_cover: bool = False,
+    cover_only: bool = False,
 ) -> dict:
     """Download original-quality images, videos, and Live Photos from a note.
 
@@ -203,7 +204,7 @@ def download_note(
     images = extract_images(note)
     cover_images = list(images)
     note_videos = extract_note_videos(note)
-    if note_videos:
+    if note_videos and not cover_only:
         runtime_videos = extract_browser_video_streams(final_url, note, logger)
         if runtime_videos:
             note_videos = runtime_videos
@@ -243,7 +244,7 @@ def download_note(
         "failures": [],
         "skipped": [],
     }
-    if download_cover:
+    if download_cover or cover_only:
         try:
             report["cover"] = download_cover_from_note(
                 cover_images,
@@ -253,8 +254,19 @@ def download_note(
                 logger,
             )
         except (XhsDownloadError, covers.CoverDownloadError) as exc:
+            if cover_only:
+                raise XhsDownloadError(f"小红书封面获取失败：{exc}") from exc
             report["cover_error"] = str(exc)
             logger(f"小红书封面获取失败：{exc}")
+    if cover_only:
+        cover = report["cover"]
+        report["kind"] = "cover"
+        report["output_path"] = str(cover.get("path") or "")
+        report["filename"] = str(cover.get("filename") or "")
+        report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        report["elapsed_seconds"] = 0
+        logger(f"小红书仅封面任务完成：{cover.get('resolution', '未知分辨率')}")
+        return report
     existing_media_names = existing_media_filenames(note_dir)
     if has_existing_note_download(note_dir, note_id, existing_media_names):
         logger(f"已存在下载结果，跳过下载：{note_id}")
@@ -440,6 +452,7 @@ def download_collection(
     max_workers: int = 4,
     use_idm: bool | str = "smart",
     download_cover: bool = False,
+    cover_only: bool = False,
 ) -> dict:
     if collection_id in {"", "__all__", "__all_videos__", "__all_favorites__"}:
         return download_favorite_videos(
@@ -448,7 +461,8 @@ def download_collection(
             log=log,
             max_workers=max_workers,
             use_idm=use_idm,
-            download_cover=download_cover,
+            download_cover=download_cover or cover_only,
+            cover_only=cover_only,
         )
     return download_xhs_collection_notes(
         collection_id,
@@ -458,7 +472,8 @@ def download_collection(
         log=log,
         max_workers=max_workers,
         use_idm=use_idm,
-        download_cover=download_cover,
+        download_cover=download_cover or cover_only,
+        cover_only=cover_only,
     )
 
 
@@ -469,6 +484,7 @@ def download_favorite_videos(
     max_workers: int = 4,
     use_idm: bool | str = "smart",
     download_cover: bool = False,
+    cover_only: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     if limit is not None and limit <= 0:
@@ -505,7 +521,8 @@ def download_favorite_videos(
         max_workers=max_workers,
         use_idm=use_idm,
         limit=limit,
-        download_cover=download_cover,
+        download_cover=download_cover or cover_only,
+        cover_only=cover_only,
     )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -527,6 +544,7 @@ def download_xhs_collection_notes(
     max_workers: int = 4,
     use_idm: bool | str = "smart",
     download_cover: bool = False,
+    cover_only: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     if limit is not None and limit <= 0:
@@ -564,7 +582,8 @@ def download_xhs_collection_notes(
         max_workers=max_workers,
         use_idm=use_idm,
         limit=limit,
-        download_cover=download_cover,
+        download_cover=download_cover or cover_only,
+        cover_only=cover_only,
     )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -587,6 +606,7 @@ def download_xhs_url_collection_items(
     use_idm: bool | str,
     limit: int | None,
     download_cover: bool = False,
+    cover_only: bool = False,
 ) -> None:
     existing_media_names = existing_media_filenames(collection_dir)
     pending: list[tuple[int, str, str]] = []
@@ -607,7 +627,8 @@ def download_xhs_url_collection_items(
 
     collection_workers, per_item_workers = split_collection_workers(len(pending), max_workers)
     if len(pending) > 1:
-        logger(f"{label}并发：作品 {collection_workers}，单作品媒体 {per_item_workers}")
+        item_label = "封面" if cover_only else "媒体"
+        logger(f"{label}并发：作品 {collection_workers}，单作品{item_label} {per_item_workers}")
 
     def run_one(item: tuple[int, str, str]) -> dict:
         index, note_id, url = item
@@ -620,7 +641,8 @@ def download_xhs_url_collection_items(
                 log=logger,
                 max_workers=per_item_workers,
                 use_idm=use_idm,
-                download_cover=download_cover,
+                download_cover=download_cover or cover_only,
+                cover_only=cover_only,
             )
             return {"kind": "item", "item": {"index": index, "note_id": note_id, "url": url, "status": "ok", "report": item_report}}
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.

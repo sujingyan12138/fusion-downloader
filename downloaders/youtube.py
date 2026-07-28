@@ -653,6 +653,56 @@ def download_video(
         raise YouTubeDownloadError(f"YouTube 视频处理失败：{exc}") from exc
 
 
+def download_cover_only(
+    url: str,
+    output_root: Path,
+    log: LogFn | None = None,
+    auth_context: dict | None = None,
+) -> dict:
+    logger = log or (lambda _message: None)
+    url = extract_url(url)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    auth_context = auth_context or read_youtube_auth_context()
+    options = {
+        "noplaylist": True,
+        "skip_download": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "logger": _YtDlpLogger(logger),
+        "quiet": True,
+        "no_warnings": False,
+    }
+    deno = find_executable("deno")
+    if deno:
+        options["js_runtimes"] = {"deno": {"path": str(Path(deno).resolve())}}
+    options.update(_auth_ydl_options(auth_context))
+    logger("正在解析 YouTube 作品封面，不下载视频媒体...")
+    try:
+        with YoutubeDL(options) as ydl:
+            info = _unwrap_info(ydl.extract_info(url, download=False))
+        cover = download_cover_from_info(info, output_root, logger)
+        report = covers.build_cover_only_report(
+            "YouTube",
+            str(info.get("id") or ""),
+            str(info.get("title") or info.get("id") or "未命名视频"),
+            str(info.get("uploader") or info.get("channel") or "未知作者"),
+            str(info.get("webpage_url") or info.get("original_url") or url),
+            cover,
+        )
+        report["auth_mode"] = str(auth_context.get("mode") or "anonymous")
+        logger(f"YouTube 仅封面任务完成：{cover.get('resolution', '未知分辨率')}")
+        return report
+    except YouTubeDownloadError:
+        raise
+    except covers.CoverDownloadError as exc:
+        raise YouTubeDownloadError(f"YouTube 封面获取失败：{exc}") from exc
+    except (CookieLoadError, DownloadError) as exc:
+        raise YouTubeDownloadError(_friendly_download_error(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise YouTubeDownloadError(f"YouTube 封面处理失败：{exc}") from exc
+
+
 def build_ydl_options(
     temp_dir: Path,
     ffmpeg: str,

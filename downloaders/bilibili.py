@@ -145,6 +145,52 @@ def download_video(
         raise BilibiliDownloadError(f"Bilibili 视频处理失败：{exc}") from exc
 
 
+def download_cover_only(
+    url: str,
+    output_root: Path,
+    log: LogFn | None = None,
+    cookie_header: str = "",
+) -> dict:
+    logger = log or (lambda _message: None)
+    url = extract_url(url)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    options = {
+        "noplaylist": True,
+        "skip_download": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "logger": _YtDlpLogger(logger),
+        "quiet": True,
+        "no_warnings": False,
+    }
+    logger("正在解析 Bilibili 作品封面，不下载视频媒体...")
+    try:
+        with YoutubeDL(options) as ydl:
+            load_bilibili_cookies(ydl, cookie_header)
+            info = _unwrap_info(ydl.extract_info(url, download=False))
+        cover = download_cover_from_info(info, output_root, logger)
+        report = covers.build_cover_only_report(
+            "Bilibili",
+            str(info.get("id") or ""),
+            str(info.get("title") or info.get("id") or "未命名视频"),
+            str(info.get("uploader") or info.get("uploader_id") or "未知作者"),
+            str(info.get("webpage_url") or info.get("original_url") or url),
+            cover,
+        )
+        report["authenticated"] = bool(cookie_header)
+        logger(f"Bilibili 仅封面任务完成：{cover.get('resolution', '未知分辨率')}")
+        return report
+    except BilibiliDownloadError:
+        raise
+    except covers.CoverDownloadError as exc:
+        raise BilibiliDownloadError(f"Bilibili 封面获取失败：{exc}") from exc
+    except DownloadError as exc:
+        raise BilibiliDownloadError(_friendly_download_error(exc)) from exc
+    except (OSError, requests.RequestException, ValueError) as exc:
+        raise BilibiliDownloadError(f"Bilibili 封面处理失败：{exc}") from exc
+
+
 def _unwrap_info(info) -> dict:
     if not isinstance(info, dict):
         raise BilibiliDownloadError("Bilibili 返回了无法识别的视频信息。")

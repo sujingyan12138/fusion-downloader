@@ -142,6 +142,55 @@ def download_video(
         raise TikTokDownloadError(f"TikTok 视频处理失败：{exc}") from exc
 
 
+def download_cover_only(
+    url: str,
+    output_root: Path,
+    log: LogFn | None = None,
+) -> dict:
+    raw_logger = log or (lambda _message: None)
+    logger = lambda message: _emit_log(raw_logger, message)
+    url = extract_url(url)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    options = {
+        "noplaylist": True,
+        "skip_download": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "logger": _YtDlpLogger(logger),
+        "quiet": True,
+        "no_warnings": False,
+    }
+    logger("正在解析 TikTok 作品封面，不下载视频媒体...")
+    try:
+        with YoutubeDL(options) as ydl:
+            info = _unwrap_info(ydl.extract_info(url, download=False))
+        cover = download_cover_from_info(info, output_root, logger)
+        report = covers.build_cover_only_report(
+            "TikTok",
+            str(info.get("id") or video_id_from_url(url)),
+            str(
+                info.get("title")
+                or info.get("description")
+                or info.get("id")
+                or "未命名作品"
+            ),
+            str(info.get("uploader") or info.get("creator") or "未知作者"),
+            str(info.get("webpage_url") or info.get("original_url") or url),
+            cover,
+        )
+        logger(f"TikTok 仅封面任务完成：{cover.get('resolution', '未知分辨率')}")
+        return report
+    except TikTokDownloadError:
+        raise
+    except covers.CoverDownloadError as exc:
+        raise TikTokDownloadError(f"TikTok 封面获取失败：{exc}") from exc
+    except DownloadError as exc:
+        raise TikTokDownloadError(_friendly_download_error(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise TikTokDownloadError(f"TikTok 封面处理失败：{exc}") from exc
+
+
 def build_ydl_options(
     temp_dir: Path,
     ffmpeg: str,

@@ -192,6 +192,7 @@ def download_note(
     cookie_header: str = "",
     fallback_aweme: dict | None = None,
     download_cover: bool = False,
+    cover_only: bool = False,
 ) -> dict:
     if prefer_format != "original":
         raise ValueError('Only prefer_format="original" is supported.')
@@ -233,7 +234,11 @@ def download_note(
     images = extract_images(aweme)
     videos = extract_videos(aweme)
 
-    browser_streams = extract_browser_video_streams(final_url, aweme, logger) if videos and not browser_captured else []
+    browser_streams = (
+        extract_browser_video_streams(final_url, aweme, logger)
+        if videos and not browser_captured and not cover_only
+        else []
+    )
     if browser_streams:
         videos = browser_streams
 
@@ -272,7 +277,7 @@ def download_note(
         "failures": [],
         "skipped": [],
     }
-    if download_cover:
+    if download_cover or cover_only:
         try:
             report["cover"] = download_cover_from_aweme(
                 aweme,
@@ -283,8 +288,19 @@ def download_note(
                 logger,
             )
         except (DouyinDownloadError, covers.CoverDownloadError) as exc:
+            if cover_only:
+                raise DouyinDownloadError(f"抖音封面获取失败：{exc}") from exc
             report["cover_error"] = str(exc)
             logger(f"抖音封面获取失败：{exc}")
+    if cover_only:
+        cover = report["cover"]
+        report["kind"] = "cover"
+        report["output_path"] = str(cover.get("path") or "")
+        report["filename"] = str(cover.get("filename") or "")
+        report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        report["elapsed_seconds"] = 0
+        logger(f"抖音仅封面任务完成：{cover.get('resolution', '未知分辨率')}")
+        return report
 
     existing_media_names = existing_media_filenames(note_dir)
     if videos and has_existing_aweme_nowm_video(note_dir, aweme_id, existing_media_names):
