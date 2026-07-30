@@ -21,6 +21,7 @@ from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
 from . import covers, douyin
+from .paths import author_output_root
 
 
 LogFn = Callable[[str], None]
@@ -175,6 +176,7 @@ def download_note(
     video_only: bool = False,
     download_cover: bool = False,
     cover_only: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     """Download original-quality images, videos, and Live Photos from a note.
 
@@ -217,8 +219,7 @@ def download_note(
             raise XhsDownloadError("该笔记不是视频笔记。")
         raise XhsDownloadError("没有在该笔记里解析到图片、视频或 Live Photo 动图。")
 
-    note_dir = Path(output_root)
-    note_dir.mkdir(parents=True, exist_ok=True)
+    note_dir = author_output_root(output_root, author, organize_by_author)
     file_prefix = safe_filename(f"小红书_{author}_{title}_{note_id}", 120)
 
     logger(f"作者：{author}")
@@ -331,6 +332,7 @@ def download_comment_images(
     log: LogFn | None = None,
     max_workers: int = 6,
     download_cover: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     source_url = extract_url(input_text)
@@ -358,8 +360,7 @@ def download_comment_images(
     if not images:
         raise XhsDownloadError("没有在评论区解析到图片。小红书评论区通常需要先登录，或该笔记评论里没有图片。")
 
-    note_dir = Path(output_root)
-    note_dir.mkdir(parents=True, exist_ok=True)
+    note_dir = author_output_root(output_root, author, organize_by_author)
     file_prefix = safe_filename(f"小红书评论_{author}_{title}_{note_id}", 120)
 
     logger(f"作者：{author}")
@@ -453,6 +454,7 @@ def download_collection(
     use_idm: bool | str = "smart",
     download_cover: bool = False,
     cover_only: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     if collection_id in {"", "__all__", "__all_videos__", "__all_favorites__"}:
         return download_favorite_videos(
@@ -463,6 +465,7 @@ def download_collection(
             use_idm=use_idm,
             download_cover=download_cover or cover_only,
             cover_only=cover_only,
+            organize_by_author=organize_by_author,
         )
     return download_xhs_collection_notes(
         collection_id,
@@ -474,6 +477,7 @@ def download_collection(
         use_idm=use_idm,
         download_cover=download_cover or cover_only,
         cover_only=cover_only,
+        organize_by_author=organize_by_author,
     )
 
 
@@ -485,6 +489,7 @@ def download_favorite_videos(
     use_idm: bool | str = "smart",
     download_cover: bool = False,
     cover_only: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     if limit is not None and limit <= 0:
@@ -523,6 +528,7 @@ def download_favorite_videos(
         limit=limit,
         download_cover=download_cover or cover_only,
         cover_only=cover_only,
+        organize_by_author=organize_by_author,
     )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -545,6 +551,7 @@ def download_xhs_collection_notes(
     use_idm: bool | str = "smart",
     download_cover: bool = False,
     cover_only: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     if limit is not None and limit <= 0:
@@ -584,6 +591,7 @@ def download_xhs_collection_notes(
         limit=limit,
         download_cover=download_cover or cover_only,
         cover_only=cover_only,
+        organize_by_author=organize_by_author,
     )
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -607,6 +615,7 @@ def download_xhs_url_collection_items(
     limit: int | None,
     download_cover: bool = False,
     cover_only: bool = False,
+    organize_by_author: bool = False,
 ) -> None:
     existing_media_names = existing_media_filenames(collection_dir)
     pending: list[tuple[int, str, str]] = []
@@ -614,6 +623,7 @@ def download_xhs_url_collection_items(
         note_id = extract_note_id_from_url(url)
         if (
             not download_cover
+            and not organize_by_author
             and note_id
             and has_existing_note_download(collection_dir, note_id, existing_media_names)
         ):
@@ -643,7 +653,19 @@ def download_xhs_url_collection_items(
                 use_idm=use_idm,
                 download_cover=download_cover or cover_only,
                 cover_only=cover_only,
+                organize_by_author=organize_by_author,
             )
+            if item_report.get("skipped"):
+                return {
+                    "kind": "skipped",
+                    "item": {
+                        "index": index,
+                        "note_id": note_id,
+                        "url": url,
+                        "reason": str(item_report["skipped"][0].get("reason") or "exists"),
+                        "report": item_report,
+                    },
+                }
             return {"kind": "item", "item": {"index": index, "note_id": note_id, "url": url, "status": "ok", "report": item_report}}
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.
             message = str(exc)
@@ -664,6 +686,8 @@ def download_xhs_url_collection_items(
     for result in sorted(results, key=lambda item: item.get("item", {}).get("index", 0)):
         if result.get("kind") == "item":
             report["items"].append(result["item"])
+        elif result.get("kind") == "skipped":
+            report["skipped"].append(result["item"])
         else:
             report["failures"].append(result["item"])
 

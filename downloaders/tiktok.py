@@ -14,6 +14,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from . import covers
+from .paths import author_output_root
 
 
 LogFn = Callable[[str], None]
@@ -76,6 +77,7 @@ def download_video(
     log: LogFn | None = None,
     max_workers: int = 4,
     download_cover: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     raw_logger = log or (lambda _message: None)
     logger = lambda message: _emit_log(raw_logger, message)
@@ -119,12 +121,14 @@ def download_video(
                 180,
             )
             suffix = media_path.suffix.lower() or ".mp4"
-            target = unique_path(output_root / f"{stem}{suffix}")
+            author = str(info.get("uploader") or info.get("creator") or "未知作者")
+            item_root = author_output_root(output_root, author, organize_by_author)
+            target = unique_path(item_root / f"{stem}{suffix}")
             shutil.move(str(media_path), str(target))
             report = build_report(info, target, probe)
             if download_cover:
                 try:
-                    report["cover"] = download_cover_from_info(info, output_root, logger)
+                    report["cover"] = download_cover_from_info(info, item_root, logger)
                 except covers.CoverDownloadError as exc:
                     report["cover_error"] = str(exc)
                     logger(f"TikTok 封面获取失败：{exc}")
@@ -146,6 +150,7 @@ def download_cover_only(
     url: str,
     output_root: Path,
     log: LogFn | None = None,
+    organize_by_author: bool = False,
 ) -> dict:
     raw_logger = log or (lambda _message: None)
     logger = lambda message: _emit_log(raw_logger, message)
@@ -165,7 +170,9 @@ def download_cover_only(
     try:
         with YoutubeDL(options) as ydl:
             info = _unwrap_info(ydl.extract_info(url, download=False))
-        cover = download_cover_from_info(info, output_root, logger)
+        author = str(info.get("uploader") or info.get("creator") or "未知作者")
+        item_root = author_output_root(output_root, author, organize_by_author)
+        cover = download_cover_from_info(info, item_root, logger)
         report = covers.build_cover_only_report(
             "TikTok",
             str(info.get("id") or video_id_from_url(url)),
@@ -175,7 +182,7 @@ def download_cover_only(
                 or info.get("id")
                 or "未命名作品"
             ),
-            str(info.get("uploader") or info.get("creator") or "未知作者"),
+            author,
             str(info.get("webpage_url") or info.get("original_url") or url),
             cover,
         )

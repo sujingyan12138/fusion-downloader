@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import requests
 
 from . import douyin
+from .paths import author_output_root
 
 
 LogFn = Callable[[str], None]
@@ -80,6 +81,7 @@ def download_collection(
     use_idm: bool | str = "smart",
     download_cover: bool = False,
     cover_only: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     clean_id = str(collection_id or "").strip()
@@ -110,7 +112,6 @@ def download_collection(
         "skipped": [],
     }
 
-    existing_media_names = existing_media_filenames(collection_dir)
     pending: list[tuple[int, dict, str, str]] = []
     for index, aweme in enumerate(awemes, start=1):
         aweme_id = str(aweme.get("aweme_id") or aweme.get("awemeId") or "")
@@ -118,19 +119,41 @@ def download_collection(
             report["failures"].append({"index": index, "error": "作品缺少 aweme_id"})
             continue
         url = collection_aweme_url(aweme)
+        has_images = bool(douyin.extract_images(aweme))
         has_video = bool(douyin.extract_videos(aweme))
+        has_long_article = douyin.has_long_article(aweme)
+        needs_markdown = (has_images or has_long_article) and bool(douyin.extract_note_text(aweme))
+        item_dir = author_output_root(
+            collection_dir,
+            douyin.author_name(aweme),
+            organize_by_author,
+        )
+        existing_media_names = existing_media_filenames(item_dir)
+        has_markdown = douyin.has_existing_aweme_markdown(item_dir, aweme_id, existing_media_names)
+        has_complete_article = douyin.has_complete_long_article_markdown(item_dir, aweme_id, aweme)
         if (
-            not download_cover
+            not (download_cover or cover_only)
+            and has_long_article
+            and not has_images
+            and not has_video
+            and has_complete_article
+        ):
+            logger(f"已存在长文章 Markdown，跳过收藏夹作品 {index}/{len(awemes)}：{aweme_id}")
+            report["skipped"].append({"index": index, "aweme_id": aweme_id, "url": url, "reason": "exists_markdown"})
+            continue
+        if (
+            not (download_cover or cover_only)
             and has_video
-            and has_existing_aweme_nowm_video(collection_dir, aweme_id, existing_media_names)
+            and has_existing_aweme_nowm_video(item_dir, aweme_id, existing_media_names)
         ):
             logger(f"已存在无水印视频，跳过收藏夹作品 {index}/{len(awemes)}：{aweme_id}")
             report["skipped"].append({"index": index, "aweme_id": aweme_id, "url": url, "reason": "exists_nowm"})
             continue
         if (
-            not download_cover
+            not (download_cover or cover_only)
             and not has_video
-            and has_existing_aweme_nowm_images(collection_dir, aweme_id, existing_media_names)
+            and has_existing_aweme_nowm_images(item_dir, aweme_id, existing_media_names)
+            and (not needs_markdown or has_markdown)
         ):
             logger(f"已存在无水印原图下载结果，跳过收藏夹作品 {index}/{len(awemes)}：{aweme_id}")
             report["skipped"].append({"index": index, "aweme_id": aweme_id, "url": url, "reason": "exists_nowm_orig"})
@@ -159,6 +182,7 @@ def download_collection(
                 fallback_aweme=aweme,
                 download_cover=download_cover or cover_only,
                 cover_only=cover_only,
+                organize_by_author=organize_by_author,
             )
             return {"kind": "item", "item": {"index": index, "aweme_id": aweme_id, "status": "ok", "report": item_report, "source": "download_note"}}
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.
@@ -215,7 +239,7 @@ def has_existing_aweme_nowm_images(output_root: Path, aweme_id: str, media_names
 
 
 def existing_media_filenames(output_root: Path) -> list[str]:
-    suffixes = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
+    suffixes = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".md"}
     try:
         return [path.name for path in output_root.iterdir() if path.is_file() and path.suffix.lower() in suffixes]
     except OSError:

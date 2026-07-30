@@ -19,6 +19,7 @@ from yt_dlp.cookies import CookieLoadError
 from yt_dlp.utils import DownloadError
 
 from . import covers
+from .paths import author_output_root
 
 LogFn = Callable[[str], None]
 
@@ -558,6 +559,7 @@ def download_video(
     max_workers: int = 4,
     auth_context: dict | None = None,
     download_cover: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     url = extract_url(url)
@@ -628,14 +630,16 @@ def download_video(
                 f"{info.get('title') or info.get('id') or '未命名视频'}_{info.get('id') or ''}",
                 180,
             )
-            target = unique_path(output_root / f"{stem}{media_path.suffix.lower() or '.mkv'}")
+            author = str(info.get("uploader") or info.get("channel") or "未知作者")
+            item_root = author_output_root(output_root, author, organize_by_author)
+            target = unique_path(item_root / f"{stem}{media_path.suffix.lower() or '.mkv'}")
             shutil.move(str(media_path), str(target))
             report = build_report(info, target, probe)
             report["download_engine"] = transfer_engine
             report["auth_mode"] = str(auth_context.get("mode") or "anonymous")
             if download_cover:
                 try:
-                    report["cover"] = download_cover_from_info(info, output_root, logger)
+                    report["cover"] = download_cover_from_info(info, item_root, logger)
                 except covers.CoverDownloadError as exc:
                     report["cover_error"] = str(exc)
                     logger(f"YouTube 封面获取失败：{exc}")
@@ -658,6 +662,7 @@ def download_cover_only(
     output_root: Path,
     log: LogFn | None = None,
     auth_context: dict | None = None,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     url = extract_url(url)
@@ -681,12 +686,14 @@ def download_cover_only(
     try:
         with YoutubeDL(options) as ydl:
             info = _unwrap_info(ydl.extract_info(url, download=False))
-        cover = download_cover_from_info(info, output_root, logger)
+        author = str(info.get("uploader") or info.get("channel") or "未知作者")
+        item_root = author_output_root(output_root, author, organize_by_author)
+        cover = download_cover_from_info(info, item_root, logger)
         report = covers.build_cover_only_report(
             "YouTube",
             str(info.get("id") or ""),
             str(info.get("title") or info.get("id") or "未命名视频"),
-            str(info.get("uploader") or info.get("channel") or "未知作者"),
+            author,
             str(info.get("webpage_url") or info.get("original_url") or url),
             cover,
         )

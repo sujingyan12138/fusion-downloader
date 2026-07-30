@@ -25,6 +25,7 @@ from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
 from . import covers
+from .paths import author_output_root
 
 
 LogFn = Callable[[str], None]
@@ -50,6 +51,18 @@ APP_VERSION = "2026-07-16-speed-v4"
 NO_WINDOW_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 IDM_LARGE_FILE_THRESHOLD = 80 * 1024 * 1024
 IDM_VIDEO_FILE_THRESHOLD = 20 * 1024 * 1024
+LONG_ARTICLE_IMAGE_URL_KEYS = (
+    "same_url",
+    "origin_image_url",
+    "ai_high_image_url",
+    "resize_url",
+    "high_image_url",
+    "markdown_url",
+)
+REMOTE_MARKDOWN_IMAGE_RE = re.compile(
+    r"!\[([^\]]*)\]\(\s*(https?://[^\s)]+)(?:\s+width=\d+\s+height=\d+)?\s*\)"
+)
+LOCAL_ASSET_IMAGE_RE = re.compile(r"!\[[^\]]*\]\((\./assets/[^)]+)\)")
 
 
 def format_bytes(size: int) -> str:
@@ -193,6 +206,7 @@ def download_note(
     fallback_aweme: dict | None = None,
     download_cover: bool = False,
     cover_only: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     if prefer_format != "original":
         raise ValueError('Only prefer_format="original" is supported.')
@@ -233,6 +247,7 @@ def download_note(
     title = note_title(aweme, aweme_id)
     images = extract_images(aweme)
     videos = extract_videos(aweme)
+    article_post = has_long_article(aweme)
 
     browser_streams = (
         extract_browser_video_streams(final_url, aweme, logger)
@@ -242,23 +257,25 @@ def download_note(
     if browser_streams:
         videos = browser_streams
 
-    if not images and not videos:
+    if not images and not videos and not article_post:
         aweme, browser_final_url = fetch_browser_aweme(final_url or source_url, logger)
         if browser_final_url:
             final_url = browser_final_url
             aweme_id = extract_aweme_id(final_url) or aweme_id
         images = extract_images(aweme)
         videos = extract_videos(aweme)
+        article_post = has_long_article(aweme)
 
-    if not images and not videos:
-        raise DouyinDownloadError("没有在该作品里解析到图片或视频。")
+    if not images and not videos and not article_post:
+        raise DouyinDownloadError("没有在该作品里解析到图片、视频或完整长文章。")
 
-    note_dir = Path(output_root)
-    note_dir.mkdir(parents=True, exist_ok=True)
+    note_dir = author_output_root(output_root, author, organize_by_author)
     file_prefix = safe_filename(f"抖音_{author}_{title}_{aweme_id}", 120)
 
     logger(f"作者：{author}")
     logger(f"图片数量：{len(images)}")
+    if article_post:
+        logger("正文类型：抖音长文章")
     if videos:
         logger(f"视频数量：{len(videos)}")
     logger(f"保存目录：{note_dir}")
@@ -277,6 +294,38 @@ def download_note(
         "failures": [],
         "skipped": [],
     }
+    if (images or article_post) and not cover_only:
+        article_text = extract_note_text(aweme)
+        if article_text:
+            if article_post:
+                localized = localize_long_article_images(
+                    aweme,
+                    article_text,
+                    note_dir,
+                    file_prefix,
+                    final_url,
+                    max_workers=max_workers,
+                    logger=logger,
+                )
+                article_text = str(localized.get("markdown") or article_text)
+                report["article_images"] = localized.get("images") or []
+                report["article_image_failures"] = localized.get("failures") or []
+            canonical_url = f"https://www.douyin.com/note/{aweme_id}"
+            report["markdown"] = save_note_markdown(
+                aweme,
+                article_text,
+                note_dir,
+                file_prefix,
+                aweme_id,
+                author,
+                title,
+                canonical_url,
+                logger,
+            )
+        elif has_truncated_note_text(aweme):
+            message = "作品详情只返回了截断正文，未生成不完整的 Markdown；请确认抖音登录态有效后重试。"
+            report["markdown_error"] = message
+            logger(message)
     if download_cover or cover_only:
         try:
             report["cover"] = download_cover_from_aweme(
@@ -300,6 +349,15 @@ def download_note(
         report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         report["elapsed_seconds"] = 0
         logger(f"抖音仅封面任务完成：{cover.get('resolution', '未知分辨率')}")
+        return report
+    if article_post and not images and not videos:
+        markdown = report.get("markdown") if isinstance(report.get("markdown"), dict) else {}
+        report["kind"] = "article"
+        report["output_path"] = str(markdown.get("path") or "")
+        report["filename"] = str(markdown.get("filename") or "")
+        report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        report["elapsed_seconds"] = 0
+        logger("抖音长文章 Markdown 下载完成。")
         return report
 
     existing_media_names = existing_media_filenames(note_dir)
@@ -368,6 +426,7 @@ def download_comment_images(
     log: LogFn | None = None,
     max_workers: int = 6,
     download_cover: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     source_url = extract_url(input_text)
@@ -417,8 +476,7 @@ def download_comment_images(
     if not images:
         raise DouyinDownloadError("没有在评论区解析到图片，或当前页面需要登录/验证后才能加载评论。")
 
-    note_dir = Path(output_root)
-    note_dir.mkdir(parents=True, exist_ok=True)
+    note_dir = author_output_root(output_root, author, organize_by_author)
     file_prefix = safe_filename(f"抖音评论_{author}_{title}_{aweme_id}", 120)
 
     logger(f"作者：{author}")
@@ -2337,12 +2395,338 @@ def author_name(aweme: dict) -> str:
 
 
 def note_title(aweme: dict, aweme_id: str) -> str:
+    article_info = aweme.get("article_info") if isinstance(aweme.get("article_info"), dict) else {}
+    article_title = str(article_info.get("article_title") or article_info.get("title") or "").strip()
+    if article_title:
+        return article_title[:48]
     desc = str(aweme.get("desc") or aweme.get("caption") or "").strip()
     for line in desc.splitlines():
         cleaned = line.strip()
         if cleaned:
             return cleaned[:48]
     return f"作品-{aweme_id}"
+
+
+def extract_note_text(aweme: dict) -> str:
+    """Return the complete text of a Douyin image/text post when available."""
+    article_markdown = extract_long_article_markdown(aweme)
+    if article_markdown:
+        return article_markdown
+
+    share_info = aweme.get("share_info") if isinstance(aweme.get("share_info"), dict) else {}
+    preferred = clean_note_text(share_info.get("share_desc_info"))
+    if preferred and not is_truncated_note_text(preferred):
+        return preferred
+
+    article_info = aweme.get("article_info") if isinstance(aweme.get("article_info"), dict) else {}
+    for key in ("content", "text", "desc"):
+        candidate = clean_note_text(article_info.get(key))
+        if candidate and not is_truncated_note_text(candidate):
+            return candidate
+
+    candidates = [
+        clean_note_text(aweme.get("caption")),
+        clean_note_text(aweme.get("desc")),
+        clean_note_text(aweme.get("preview_title")),
+    ]
+    complete = [candidate for candidate in candidates if candidate and not is_truncated_note_text(candidate)]
+    if complete:
+        return max(complete, key=len)
+
+    share_link_text = clean_note_text(share_info.get("share_link_desc"), strip_share_wrapper=True)
+    if share_link_text and not is_truncated_note_text(share_link_text):
+        return share_link_text
+    return ""
+
+
+def extract_long_article_markdown(aweme: dict) -> str:
+    article_info = aweme.get("article_info") if isinstance(aweme.get("article_info"), dict) else {}
+    article_content = decode_json_container(article_info.get("article_content"))
+    if isinstance(article_content, dict):
+        for key in ("markdown", "content", "text", "article_content", "articleContent"):
+            candidate = clean_note_text(article_content.get(key))
+            if candidate and not is_truncated_note_text(candidate):
+                return candidate
+    for key in ("markdown", "content", "text"):
+        candidate = clean_note_text(article_info.get(key))
+        if candidate and not is_truncated_note_text(candidate):
+            return candidate
+    return ""
+
+
+def has_long_article(aweme: dict) -> bool:
+    return bool(extract_long_article_markdown(aweme))
+
+
+def extract_long_article_image_items(aweme: dict) -> list[ImageItem]:
+    article_info = aweme.get("article_info") if isinstance(aweme.get("article_info"), dict) else {}
+    fe_data = decode_json_container(article_info.get("fe_data"))
+    raw_images = fe_data.get("image_list") if isinstance(fe_data, dict) else []
+    if not isinstance(raw_images, list):
+        return []
+
+    items: list[ImageItem] = []
+    for index, raw in enumerate(raw_images, start=1):
+        if not isinstance(raw, dict):
+            continue
+        candidates: list[ImageCandidate] = []
+        seen: set[str] = set()
+        for key in LONG_ARTICLE_IMAGE_URL_KEYS:
+            url = normalize_url(str(raw.get(key) or ""))
+            if not is_http_url(url) or url in seen:
+                continue
+            seen.add(url)
+            candidates.append(
+                ImageCandidate(
+                    url=url,
+                    source=f"article_info.fe_data.image_list[{index - 1}].{key}",
+                    preview=key == "markdown_url",
+                )
+            )
+        if candidates:
+            items.append(ImageItem(index=index, candidates=candidates))
+    return items
+
+
+def localize_long_article_images(
+    aweme: dict,
+    markdown: str,
+    output_root: str | Path,
+    file_prefix: str,
+    referer: str,
+    *,
+    max_workers: int = 4,
+    logger: LogFn | None = None,
+) -> dict:
+    matches = list(REMOTE_MARKDOWN_IMAGE_RE.finditer(markdown))
+    if not matches:
+        return {"markdown": markdown, "images": [], "failures": []}
+
+    assets_dir = Path(output_root) / "assets"
+    structured_items = extract_long_article_image_items(aweme)
+
+    def download_one(index: int, match: re.Match[str]) -> dict:
+        remote_url = normalize_url(match.group(2))
+        if index <= len(structured_items):
+            base = structured_items[index - 1]
+            candidates = list(base.candidates)
+        else:
+            candidates = []
+        if remote_url and all(candidate.url != remote_url for candidate in candidates):
+            candidates.append(
+                ImageCandidate(
+                    url=remote_url,
+                    source=f"article_markdown[{index - 1}]",
+                    preview=True,
+                )
+            )
+        if not candidates:
+            raise DouyinDownloadError("正文图片没有可用候选链接。")
+
+        best = choose_best_image(
+            make_session(),
+            ImageItem(index=index, candidates=candidates),
+            referer,
+        )
+        stem = safe_filename(
+            f"{file_prefix}_文章图片_{index:03d}_{best.width}x{best.height}",
+            155,
+        )
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        target = assets_dir / f"{stem}.{best.extension}"
+        status = "ok"
+        if target.is_file() and is_decodable_image_size(target, best.width, best.height):
+            status = "skipped"
+        else:
+            if target.exists():
+                target = unique_path(target)
+            try:
+                target.write_bytes(best.content)
+            except OSError as exc:
+                raise DouyinDownloadError(f"保存正文图片失败：{exc}") from exc
+
+        relative_path = f"./assets/{quote(target.name, safe='._-')}"
+        alt = match.group(1) or f"文章图片 {index}"
+        return {
+            "index": index,
+            "status": status,
+            "path": str(target),
+            "filename": target.name,
+            "relative_path": relative_path,
+            "width": best.width,
+            "height": best.height,
+            "bytes": len(best.content),
+            "source": best.candidate.source,
+            "url": best.candidate.url,
+            "replacement": f"![{alt}]({relative_path})",
+        }
+
+    image_reports: list[dict] = []
+    failures: list[dict] = []
+    worker_count = max(1, min(len(matches), max(1, min(max_workers, 4))))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(download_one, index, match): index
+            for index, match in enumerate(matches, start=1)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                image_reports.append(future.result())
+            except Exception as exc:  # noqa: BLE001 - preserve the remote link for this image.
+                failures.append({"index": index, "error": str(exc)})
+
+    image_reports.sort(key=lambda item: item.get("index", 0))
+    failures.sort(key=lambda item: item.get("index", 0))
+    replacements = {item["index"]: item["replacement"] for item in image_reports}
+    chunks: list[str] = []
+    cursor = 0
+    for index, match in enumerate(matches, start=1):
+        chunks.append(markdown[cursor : match.start()])
+        chunks.append(replacements.get(index, match.group(0)))
+        cursor = match.end()
+    chunks.append(markdown[cursor:])
+    localized_markdown = "".join(chunks)
+
+    if logger:
+        for item in image_reports:
+            action = "复用" if item.get("status") == "skipped" else "保存"
+            logger(
+                f"文章图片 {item['index']:03d}：{action} "
+                f"{item['width']}x{item['height']} -> {item['relative_path']}"
+            )
+        for failure in failures:
+            logger(f"文章图片 {failure['index']:03d} 本地化失败，保留远程引用：{failure['error']}")
+        logger(f"文章图片完成：本地 {len(image_reports)}/{len(matches)}，失败 {len(failures)}")
+
+    return {
+        "markdown": localized_markdown,
+        "assets_dir": str(assets_dir),
+        "images": image_reports,
+        "failures": failures,
+    }
+
+
+def is_decodable_image_size(path: Path, width: int, height: int) -> bool:
+    try:
+        with Image.open(path) as image:
+            image.load()
+            return image.size == (width, height)
+    except (OSError, UnidentifiedImageError):
+        return False
+
+
+def clean_note_text(value, *, strip_share_wrapper: bool = False) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = html.unescape(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
+    text = text.replace("\u200b", "").replace("\ufeff", "").strip()
+    text = re.sub(r"^#?在抖音[，,]\s*记录美好生活#?", "", text).lstrip()
+    text = re.sub(r"\s*%s\s*复制此链接，打开Dou音搜索，直接观看视频！?\s*$", "", text)
+    if strip_share_wrapper:
+        text = re.sub(r"\s*复制此链接，打开Dou音搜索，直接观看视频！?\s*$", "", text)
+    text = re.sub(r"\n[ \t]+\n", "\n\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def is_truncated_note_text(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "版本过低，升级后可展示全部信息",
+            "升级后可展示全部信息",
+        )
+    )
+
+
+def has_truncated_note_text(aweme: dict) -> bool:
+    share_info = aweme.get("share_info") if isinstance(aweme.get("share_info"), dict) else {}
+    values = [
+        aweme.get("desc"),
+        aweme.get("caption"),
+        aweme.get("preview_title"),
+        share_info.get("share_desc_info"),
+        share_info.get("share_link_desc"),
+    ]
+    return any(is_truncated_note_text(clean_note_text(value)) for value in values)
+
+
+def render_note_markdown(
+    aweme: dict,
+    article_text: str,
+    *,
+    aweme_id: str,
+    author: str,
+    title: str,
+    source_url: str,
+) -> str:
+    heading = re.sub(r"\s+", " ", title).strip() or f"作品-{aweme_id}"
+    lines = [
+        f"# {heading}",
+        "",
+        f"- 作者：{author}",
+        f"- 作品 ID：{aweme_id}",
+        f"- 来源：<{source_url}>",
+    ]
+    create_time = to_int(aweme.get("create_time") or aweme.get("createTime"))
+    if create_time > 0:
+        lines.append(f"- 发布时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(create_time))}")
+    lines.extend(["", "---", "", article_text.strip(), ""])
+    return "\n".join(lines)
+
+
+def save_note_markdown(
+    aweme: dict,
+    article_text: str,
+    output_root: str | Path,
+    file_prefix: str,
+    aweme_id: str,
+    author: str,
+    title: str,
+    source_url: str,
+    logger: LogFn | None = None,
+) -> dict:
+    root = Path(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+    content = render_note_markdown(
+        aweme,
+        article_text,
+        aweme_id=aweme_id,
+        author=author,
+        title=title,
+        source_url=source_url,
+    )
+    for existing in sorted(root.glob(f"*{aweme_id}*_正文*.md")):
+        if not existing.is_file():
+            continue
+        try:
+            if existing.read_text(encoding="utf-8") == content:
+                if logger:
+                    logger(f"正文 Markdown 已存在，跳过重复保存：{existing}")
+                return {
+                    "status": "skipped",
+                    "path": str(existing),
+                    "filename": existing.name,
+                    "characters": len(article_text),
+                }
+        except OSError:
+            continue
+
+    target = unique_path(root / f"{file_prefix}_正文.md")
+    try:
+        target.write_text(content, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        raise DouyinDownloadError(f"保存正文 Markdown 失败：{exc}") from exc
+    if logger:
+        logger(f"正文 Markdown：{target}")
+    return {
+        "status": "ok",
+        "path": str(target),
+        "filename": target.name,
+        "characters": len(article_text),
+    }
 
 
 def extract_images(aweme: dict) -> list[ImageItem]:
@@ -2475,7 +2859,7 @@ def unique_image_candidates(candidates: list[ImageCandidate]) -> list[ImageCandi
 
 def extract_videos(aweme: dict) -> list[dict]:
     video = aweme.get("video")
-    if isinstance(video, dict):
+    if isinstance(video, dict) and media_candidates(video, "video"):
         return [video]
     return []
 
@@ -3240,7 +3624,13 @@ def is_watermark_image_url(url: str) -> bool:
 
 def is_audio_url(url: str) -> bool:
     lower = url.lower()
-    return "media-audio" in lower or "audio-" in lower or "mime_type=audio" in lower
+    path = urlparse(lower).path
+    return (
+        "media-audio" in lower
+        or "audio-" in lower
+        or "mime_type=audio" in lower
+        or path.endswith((".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus"))
+    )
 
 
 def is_backup_url(url: str) -> bool:
@@ -3308,8 +3698,51 @@ def has_existing_aweme_nowm_images(output_root: Path, aweme_id: str, media_names
     return any(any(output_root.glob(pattern)) for pattern in patterns)
 
 
+def has_existing_aweme_markdown(output_root: Path, aweme_id: str, media_names: list[str] | None = None) -> bool:
+    if not aweme_id:
+        return False
+    if media_names is not None:
+        return any(aweme_id in name and "_正文" in name and name.lower().endswith(".md") for name in media_names)
+    return any(output_root.glob(f"*{aweme_id}*_正文*.md"))
+
+
+def has_complete_long_article_markdown(output_root: Path, aweme_id: str, aweme: dict) -> bool:
+    if not aweme_id:
+        return False
+    article_markdown = extract_long_article_markdown(aweme)
+    expected_images = len(REMOTE_MARKDOWN_IMAGE_RE.findall(article_markdown))
+    for markdown_path in sorted(output_root.glob(f"*{aweme_id}*_正文*.md")):
+        if not markdown_path.is_file():
+            continue
+        try:
+            content = markdown_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if expected_images == 0:
+            return True
+        references = LOCAL_ASSET_IMAGE_RE.findall(content)
+        if len(references) != expected_images:
+            continue
+        assets_root = (markdown_path.parent / "assets").resolve()
+        complete = True
+        for reference in references:
+            relative = unquote(reference[2:])
+            target = (markdown_path.parent / relative).resolve()
+            try:
+                target.relative_to(assets_root)
+            except ValueError:
+                complete = False
+                break
+            if not target.is_file():
+                complete = False
+                break
+        if complete:
+            return True
+    return False
+
+
 def existing_media_filenames(output_root: Path) -> list[str]:
-    suffixes = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
+    suffixes = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".md"}
     try:
         return [path.name for path in output_root.iterdir() if path.is_file() and path.suffix.lower() in suffixes]
     except OSError:

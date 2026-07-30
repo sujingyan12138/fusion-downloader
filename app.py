@@ -66,27 +66,52 @@ def output_root_for_parent(parent: Path) -> Path:
     return parent / OUTPUT_DIR_NAME
 
 
+def load_app_settings(settings_path: Path = SETTINGS_PATH) -> dict:
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, UnicodeError, json.JSONDecodeError, AttributeError, TypeError):
+        return {}
+
+
+def save_app_settings(data: dict, settings_path: Path = SETTINGS_PATH) -> None:
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def load_output_parent(
     settings_path: Path = SETTINGS_PATH,
     default_parent: Path = DEFAULT_OUTPUT_PARENT,
 ) -> Path:
-    try:
-        data = json.loads(settings_path.read_text(encoding="utf-8"))
-        saved_parent = str(data.get("output_parent") or "").strip()
-        candidate = Path(saved_parent).expanduser()
-        if candidate.is_absolute():
-            return candidate
-    except (OSError, UnicodeError, json.JSONDecodeError, AttributeError, TypeError):
-        pass
+    data = load_app_settings(settings_path)
+    saved_parent = str(data.get("output_parent") or "").strip()
+    candidate = Path(saved_parent).expanduser()
+    if candidate.is_absolute():
+        return candidate
     return default_parent
 
 
 def save_output_parent(parent: Path, settings_path: Path = SETTINGS_PATH) -> None:
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(
-        json.dumps({"output_parent": str(parent)}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    data = load_app_settings(settings_path)
+    data["output_parent"] = str(parent)
+    save_app_settings(data, settings_path)
+
+
+def load_organize_by_author(settings_path: Path = SETTINGS_PATH) -> bool:
+    value = load_app_settings(settings_path).get("organize_by_author")
+    return value if isinstance(value, bool) else True
+
+
+def save_organize_by_author(
+    enabled: bool,
+    settings_path: Path = SETTINGS_PATH,
+) -> None:
+    data = load_app_settings(settings_path)
+    data["organize_by_author"] = bool(enabled)
+    save_app_settings(data, settings_path)
 
 
 def _rounded_points(width: int, height: int, radius: int, inset: int = 1) -> list[int]:
@@ -665,6 +690,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.run_mode_var = tk.StringVar(value="单个")
         self.download_cover_var = tk.BooleanVar(value=False)
         self.cover_only_var = tk.BooleanVar(value=False)
+        self.organize_by_author_var = tk.BooleanVar(value=load_organize_by_author())
         self.mode_manually_selected = False
         self.advanced_visible = tk.BooleanVar(value=False)
         self.log_visible = tk.BooleanVar(value=True)
@@ -682,6 +708,8 @@ class UnifiedDownloaderApp(tk.Tk):
         self.clear_log_button: ttk.Button | None = None
         self.download_cover_check: CheckmarkToggle | None = None
         self.cover_only_check: CheckmarkToggle | None = None
+        self.author_folder_radio: ttk.Radiobutton | None = None
+        self.flat_output_radio: ttk.Radiobutton | None = None
         self.platform_buttons: list[ttk.Radiobutton] = []
         self._wide_layout: bool | None = None
 
@@ -784,6 +812,34 @@ class UnifiedDownloaderApp(tk.Tk):
             background=COLORS["surface_subtle"],
             foreground=COLORS["text_secondary"],
             font=("Microsoft YaHei UI", 8),
+        )
+        style.configure(
+            "FooterEyebrow.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text_tertiary"],
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        style.configure(
+            "FooterPath.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text"],
+            font=("Microsoft YaHei UI", 10),
+        )
+        style.configure(
+            "FooterTitle.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text"],
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        style.configure(
+            "FooterHint.TLabel",
+            background=COLORS["surface"],
+            foreground=COLORS["text_tertiary"],
+            font=("Microsoft YaHei UI", 8),
+        )
+        style.configure(
+            "FooterSegment.TFrame",
+            background=COLORS["surface_subtle"],
         )
         style.configure(
             "AccentHint.TLabel",
@@ -1041,6 +1097,44 @@ class UnifiedDownloaderApp(tk.Tk):
                 ("!selected", COLORS["surface_hover"]),
             ],
         )
+        style.layout(
+            "FooterMode.TRadiobutton",
+            [
+                (
+                    "Radiobutton.padding",
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            ("Radiobutton.label", {"sticky": "nswe"}),
+                        ],
+                    },
+                )
+            ],
+        )
+        style.configure(
+            "FooterMode.TRadiobutton",
+            background=COLORS["surface_subtle"],
+            foreground=COLORS["text_secondary"],
+            padding=(15, 9),
+            anchor="center",
+            borderwidth=0,
+            focusthickness=0,
+            focussolid=False,
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map(
+            "FooterMode.TRadiobutton",
+            background=[
+                ("selected", COLORS["accent_soft"]),
+                ("active", COLORS["surface_hover"]),
+                ("!selected", COLORS["surface_subtle"]),
+            ],
+            foreground=[
+                ("disabled", "#A1ADA7"),
+                ("selected", COLORS["accent_dark"]),
+                ("!selected", COLORS["text_secondary"]),
+            ],
+        )
         style.configure(
             "Horizontal.TProgressbar",
             troughcolor=COLORS["divider"],
@@ -1107,29 +1201,6 @@ class UnifiedDownloaderApp(tk.Tk):
             sticky="w",
             pady=(2, 0),
         )
-        nav_actions = ttk.Frame(nav, style="Root.TFrame")
-        nav_actions.grid(row=0, column=1, sticky="e")
-        self.choose_output_button = PillButton(
-            nav_actions,
-            text="更改位置",
-            command=self.choose_output_parent,
-            canvas_bg=COLORS["background"],
-            min_width=96,
-            height=38,
-            font=("Microsoft YaHei UI", 9),
-        )
-        self.choose_output_button.grid(row=0, column=0, sticky="e", padx=(0, 8))
-        self.open_output_button = PillButton(
-            nav_actions,
-            text="打开下载结果",
-            command=self.open_output_dir,
-            canvas_bg=COLORS["background"],
-            min_width=116,
-            height=38,
-            font=("Microsoft YaHei UI", 9),
-        )
-        self.open_output_button.grid(row=0, column=1, sticky="e")
-
         self.hero_banner = HeroBanner(page)
         self.hero_banner.grid(
             row=1,
@@ -1619,15 +1690,138 @@ class UnifiedDownloaderApp(tk.Tk):
         self.log_box.bind("<Button-3>", self.show_log_menu)
         self.log_box.bind("<Control-a>", self.select_all_log)
 
-        self.footer = ttk.Frame(page, style="Root.TFrame", padding=(34, 8, 34, 20))
+        self.footer = ttk.Frame(page, style="Root.TFrame", padding=(34, 6, 34, 22))
         self.footer.columnconfigure(0, weight=1)
-        self.output_path_label = ttk.Label(
+        self.footer_card = RoundedCard(
             self.footer,
-            text=f"下载保存到  {self.output_root}",
-            style="Subtitle.TLabel",
-            wraplength=700,
+            canvas_bg=COLORS["background"],
+            fill=COLORS["surface"],
+            radius=20,
+            outline=COLORS["border"],
+            inset=18,
+            shadow=False,
         )
-        self.output_path_label.grid(row=0, column=0, sticky="w")
+        self.footer_card.grid(row=0, column=0, sticky="ew")
+        footer_content = self.footer_card.body
+        footer_content.columnconfigure(0, weight=1)
+
+        location_row = tk.Frame(
+            footer_content,
+            bg=COLORS["surface"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        location_row.grid(row=0, column=0, sticky="ew")
+        location_row.columnconfigure(0, weight=1)
+        location_info = tk.Frame(
+            location_row,
+            bg=COLORS["surface"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        location_info.grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            location_info,
+            text="下载位置",
+            style="FooterEyebrow.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.output_path_label = ttk.Label(
+            location_info,
+            text=str(self.output_root),
+            style="FooterPath.TLabel",
+            wraplength=720,
+        )
+        self.output_path_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+
+        footer_actions = tk.Frame(
+            location_row,
+            bg=COLORS["surface"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        footer_actions.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        self.choose_output_button = PillButton(
+            footer_actions,
+            text="更改位置",
+            command=self.choose_output_parent,
+            canvas_bg=COLORS["surface"],
+            min_width=100,
+            height=40,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.choose_output_button.grid(row=0, column=0, sticky="e", padx=(0, 8))
+        self.open_output_button = PillButton(
+            footer_actions,
+            text="打开下载结果",
+            command=self.open_output_dir,
+            variant="primary",
+            canvas_bg=COLORS["surface"],
+            min_width=128,
+            height=40,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.open_output_button.grid(row=0, column=1, sticky="e")
+
+        divider = tk.Frame(
+            footer_content,
+            height=1,
+            bg=COLORS["divider"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        divider.grid(row=1, column=0, sticky="ew", pady=(14, 12))
+
+        organization_row = tk.Frame(
+            footer_content,
+            bg=COLORS["surface"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        organization_row.grid(row=2, column=0, sticky="ew")
+        organization_row.columnconfigure(0, weight=1)
+        organization_info = tk.Frame(
+            organization_row,
+            bg=COLORS["surface"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        organization_info.grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            organization_info,
+            text="文件归类",
+            style="FooterTitle.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.organization_hint_label = ttk.Label(
+            organization_info,
+            text=self._organization_hint_text(),
+            style="FooterHint.TLabel",
+        )
+        self.organization_hint_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+
+        organization_strip = ttk.Frame(
+            organization_row,
+            style="FooterSegment.TFrame",
+            padding=(4, 4, 4, 4),
+        )
+        organization_strip.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        self.author_folder_radio = ttk.Radiobutton(
+            organization_strip,
+            text="按博主分类",
+            variable=self.organize_by_author_var,
+            value=True,
+            command=self._on_output_organization_change,
+            style="FooterMode.TRadiobutton",
+        )
+        self.author_folder_radio.grid(row=0, column=0, sticky="ew")
+        self.flat_output_radio = ttk.Radiobutton(
+            organization_strip,
+            text="全部平铺",
+            variable=self.organize_by_author_var,
+            value=False,
+            command=self._on_output_organization_change,
+            style="FooterMode.TRadiobutton",
+        )
+        self.flat_output_radio.grid(row=0, column=1, sticky="ew", padx=(2, 0))
         self._apply_responsive_layout(1180)
 
     def _stat_card(
@@ -2424,9 +2618,11 @@ class UnifiedDownloaderApp(tk.Tk):
         self._reset_stats(total=1 if options.feature in {"收藏夹", "收藏视频", "收藏作品"} else len(options.inputs))
         self.empty_state_label.configure(text="任务运行中，请等待下载完成。")
         cover_mode = "仅下载封面" if options.cover_only else ("同时保存" if options.download_cover else "不保存")
+        organization_mode = "按博主分类" if options.organize_by_author else "全部平铺"
         self._append_log(
             f"开始任务：平台={options.platform}，功能={options.feature}，"
-            f"封面模式={cover_mode}\n输出位置：{options.output_root}\n"
+            f"封面模式={cover_mode}，保存方式={organization_mode}\n"
+            f"输出根目录：{options.output_root}\n"
         )
         if options.cover_only:
             self._append_log("仅封面模式已启用：本次不会下载视频、作品图片或评论内容。\n")
@@ -2467,6 +2663,7 @@ class UnifiedDownloaderApp(tk.Tk):
             collection_name=collection_name,
             download_cover=self.download_cover_var.get() or cover_only,
             cover_only=cover_only,
+            organize_by_author=self.organize_by_author_var.get(),
         )
 
     def _selected_workers(self) -> int:
@@ -2582,7 +2779,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.output_parent = parent
         self.output_root = output_root
         self.last_output_dir = None
-        self.output_path_label.configure(text=f"下载保存到  {self.output_root}")
+        self.output_path_label.configure(text=str(self.output_root))
         self._append_log(f"输出位置已更改：{self.output_root}\n")
         try:
             save_output_parent(parent)
@@ -2591,6 +2788,26 @@ class UnifiedDownloaderApp(tk.Tk):
                 "位置已更改",
                 f"本次会话将使用所选位置，但无法保存该设置：\n{exc}",
             )
+
+    def _on_output_organization_change(self) -> None:
+        if self.is_running:
+            return
+        enabled = self.organize_by_author_var.get()
+        label = "按博主分类" if enabled else "全部放在下载结果"
+        self.organization_hint_label.configure(text=self._organization_hint_text())
+        self._append_log(f"保存方式已切换：{label}\n")
+        try:
+            save_organize_by_author(enabled)
+        except OSError as exc:
+            messagebox.showwarning(
+                "保存方式已切换",
+                f"本次会话将使用“{label}”，但无法保存该设置：\n{exc}",
+            )
+
+    def _organization_hint_text(self) -> str:
+        if self.organize_by_author_var.get():
+            return "同一博主的作品会自动收纳到同名文件夹"
+        return "所有作品直接保存在下载结果根目录"
 
     def _reset_stats(self, total: int = 0) -> None:
         self.total_tasks = total
@@ -2637,6 +2854,10 @@ class UnifiedDownloaderApp(tk.Tk):
             self.download_cover_check.configure(state=state)
         if self.cover_only_check is not None:
             self.cover_only_check.configure(state=state)
+        if self.author_folder_radio is not None:
+            self.author_folder_radio.configure(state=state)
+        if self.flat_output_radio is not None:
+            self.flat_output_radio.configure(state=state)
         self.comment_limit_entry.configure(state=state)
         self.collection_limit_entry.configure(state=state)
         for button in (

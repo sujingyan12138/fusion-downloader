@@ -5,6 +5,7 @@ import tempfile
 import tkinter as tk
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import app
 from PIL import Image
@@ -33,6 +34,27 @@ class OutputLocationTests(unittest.TestCase):
             )
             saved = json.loads(settings_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["output_parent"], str(selected_parent))
+
+    def test_output_preferences_preserve_each_other_and_author_mode_defaults_on(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_root = Path(temp_name)
+            settings_path = temp_root / "下载器设置.json"
+            selected_parent = temp_root / "自定义位置"
+
+            self.assertTrue(app.load_organize_by_author(settings_path))
+            app.save_organize_by_author(False, settings_path)
+            app.save_output_parent(selected_parent, settings_path)
+
+            self.assertFalse(app.load_organize_by_author(settings_path))
+            self.assertEqual(app.load_output_parent(settings_path, temp_root), selected_parent)
+            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                saved,
+                {
+                    "organize_by_author": False,
+                    "output_parent": str(selected_parent),
+                },
+            )
 
     def test_invalid_setting_falls_back_to_default_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -142,6 +164,34 @@ class GuiThemeTests(unittest.TestCase):
                 ),
                 2,
             )
+        finally:
+            root.destroy()
+
+    def test_output_controls_are_in_footer_and_author_grouping_is_default(self) -> None:
+        with patch("app.load_organize_by_author", return_value=True):
+            root = app.UnifiedDownloaderApp()
+        root.withdraw()
+        try:
+            root.update_idletasks()
+            self.assertTrue(root.organize_by_author_var.get())
+            self.assertIsNotNone(root.choose_output_button)
+            self.assertIsNotNone(root.open_output_button)
+            self.assertIsNotNone(root.author_folder_radio)
+            self.assertIsNotNone(root.flat_output_radio)
+
+            def is_descendant(widget: tk.Widget, ancestor: tk.Widget) -> bool:
+                current: tk.Widget | None = widget
+                while current is not None:
+                    if current is ancestor:
+                        return True
+                    parent_name = current.winfo_parent()
+                    current = current._nametowidget(parent_name) if parent_name else None
+                return False
+
+            self.assertTrue(is_descendant(root.choose_output_button, root.footer))
+            self.assertTrue(is_descendant(root.open_output_button, root.footer))
+            self.assertEqual(root.author_folder_radio.cget("text"), "按博主分类")
+            self.assertEqual(root.flat_output_radio.cget("text"), "全部平铺")
         finally:
             root.destroy()
 

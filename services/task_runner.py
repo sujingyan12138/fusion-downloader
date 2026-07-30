@@ -26,6 +26,7 @@ class TaskOptions:
     collection_name: str = ""
     download_cover: bool = False
     cover_only: bool = False
+    organize_by_author: bool = True
 
 
 def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
@@ -63,6 +64,7 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
                 use_idm=options.download_engine,
                 download_cover=options.download_cover or options.cover_only,
                 cover_only=options.cover_only,
+                organize_by_author=options.organize_by_author,
             )
             report["cover_failures"] = collect_collection_cover_failures(report)
             return report
@@ -79,6 +81,7 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
             use_idm=options.download_engine,
             download_cover=options.download_cover or options.cover_only,
             cover_only=options.cover_only,
+            organize_by_author=options.organize_by_author,
         )
         report["cover_failures"] = collect_collection_cover_failures(report)
         return report
@@ -103,7 +106,12 @@ def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
     log(url)
     try:
         if options.cover_only:
-            report = tiktok.download_cover_only(url, root, log=log)
+            report = tiktok.download_cover_only(
+                url,
+                root,
+                log=log,
+                organize_by_author=options.organize_by_author,
+            )
         else:
             report = tiktok.download_video(
                 url,
@@ -111,6 +119,7 @@ def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
                 log=log,
                 max_workers=options.max_workers,
                 download_cover=options.download_cover,
+                organize_by_author=options.organize_by_author,
             )
         return {
             "output_dir": str(root),
@@ -157,6 +166,7 @@ def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
                     root,
                     log=log,
                     auth_context=auth_context,
+                    organize_by_author=options.organize_by_author,
                 )
             else:
                 report = youtube.download_video(
@@ -166,6 +176,7 @@ def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
                     max_workers=per_item_workers,
                     auth_context=auth_context,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
@@ -220,6 +231,7 @@ def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
                     root,
                     log=log,
                     cookie_header=cookie_header,
+                    organize_by_author=options.organize_by_author,
                 )
             else:
                 report = bilibili.download_video(
@@ -229,6 +241,7 @@ def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
                     max_workers=per_item_workers,
                     cookie_header=cookie_header,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
@@ -273,6 +286,7 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
                     use_idm=options.download_engine,
                     download_cover=True,
                     cover_only=True,
+                    organize_by_author=options.organize_by_author,
                 )
             elif options.feature == "评论区图片":
                 report = douyin.download_comment_images(
@@ -282,6 +296,7 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
                     log=log,
                     max_workers=per_item_workers,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
             elif options.feature == "作品媒体+评论区图片":
                 media_report = douyin.download_note(
@@ -291,8 +306,16 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
                     max_workers=per_item_workers,
                     use_idm=options.download_engine,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
-                comment_report = douyin.download_comment_images(url, comment_root, limit=options.comment_limit, log=log, max_workers=per_item_workers)
+                comment_report = douyin.download_comment_images(
+                    url,
+                    comment_root,
+                    limit=options.comment_limit,
+                    log=log,
+                    max_workers=per_item_workers,
+                    organize_by_author=options.organize_by_author,
+                )
                 comment_report["media_report"] = media_report
                 report = comment_report
             else:
@@ -303,6 +326,7 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
                     max_workers=per_item_workers,
                     use_idm=options.download_engine,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
@@ -345,6 +369,7 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
                     use_idm=options.download_engine,
                     download_cover=True,
                     cover_only=True,
+                    organize_by_author=options.organize_by_author,
                 )
             elif options.feature == "评论区图片":
                 report = xiaohongshu.download_comment_images(
@@ -354,6 +379,7 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
                     log=log,
                     max_workers=per_item_workers,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
             elif options.feature == "作品媒体+评论区图片":
                 media_report = xiaohongshu.download_note(
@@ -363,8 +389,16 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
                     max_workers=per_item_workers,
                     use_idm=options.download_engine,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
-                comment_report = xiaohongshu.download_comment_images(url, root, limit=options.comment_limit, log=log, max_workers=per_item_workers)
+                comment_report = xiaohongshu.download_comment_images(
+                    url,
+                    root,
+                    limit=options.comment_limit,
+                    log=log,
+                    max_workers=per_item_workers,
+                    organize_by_author=options.organize_by_author,
+                )
                 comment_report["media_report"] = media_report
                 report = comment_report
             else:
@@ -375,6 +409,7 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
                     max_workers=per_item_workers,
                     use_idm=options.download_engine,
                     download_cover=options.download_cover,
+                    organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.

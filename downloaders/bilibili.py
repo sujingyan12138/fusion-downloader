@@ -20,6 +20,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from . import covers, douyin
+from .paths import author_output_root
 
 
 LogFn = Callable[[str], None]
@@ -82,6 +83,7 @@ def download_video(
     max_workers: int = 4,
     cookie_header: str = "",
     download_cover: bool = False,
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     url = extract_url(url)
@@ -121,13 +123,15 @@ def download_video(
                 missing = "视频" if not probe["has_video"] else "音频"
                 raise BilibiliDownloadError(f"下载结果缺少{missing}流，未将其保存为完成品。")
 
-            target = unique_path(output_root / media_path.name)
+            author = str(info.get("uploader") or info.get("uploader_id") or "未知作者")
+            item_root = author_output_root(output_root, author, organize_by_author)
+            target = unique_path(item_root / media_path.name)
             shutil.move(str(media_path), str(target))
             report = build_report(info, target, probe)
             report["authenticated"] = bool(cookie_header)
             if download_cover:
                 try:
-                    report["cover"] = download_cover_from_info(info, output_root, logger)
+                    report["cover"] = download_cover_from_info(info, item_root, logger)
                 except covers.CoverDownloadError as exc:
                     report["cover_error"] = str(exc)
                     logger(f"Bilibili 封面获取失败：{exc}")
@@ -150,6 +154,7 @@ def download_cover_only(
     output_root: Path,
     log: LogFn | None = None,
     cookie_header: str = "",
+    organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
     url = extract_url(url)
@@ -169,12 +174,14 @@ def download_cover_only(
         with YoutubeDL(options) as ydl:
             load_bilibili_cookies(ydl, cookie_header)
             info = _unwrap_info(ydl.extract_info(url, download=False))
-        cover = download_cover_from_info(info, output_root, logger)
+        author = str(info.get("uploader") or info.get("uploader_id") or "未知作者")
+        item_root = author_output_root(output_root, author, organize_by_author)
+        cover = download_cover_from_info(info, item_root, logger)
         report = covers.build_cover_only_report(
             "Bilibili",
             str(info.get("id") or ""),
             str(info.get("title") or info.get("id") or "未命名视频"),
-            str(info.get("uploader") or info.get("uploader_id") or "未知作者"),
+            author,
             str(info.get("webpage_url") or info.get("original_url") or url),
             cover,
         )

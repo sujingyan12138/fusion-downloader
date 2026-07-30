@@ -211,7 +211,10 @@ class CoverOnlyPlatformTests(unittest.TestCase):
             return_value=("<html></html>", url),
         ), patch(
             "downloaders.douyin.find_aweme",
-            return_value={"aweme_id": "7666007676588920091"},
+            return_value={
+                "aweme_id": "7666007676588920091",
+                "author": {"nickname": "作者"},
+            },
         ), patch(
             "downloaders.douyin.extract_images",
             return_value=[],
@@ -223,12 +226,19 @@ class CoverOnlyPlatformTests(unittest.TestCase):
         ) as browser_streams, patch(
             "downloaders.douyin.download_cover_from_aweme",
             return_value=cover,
-        ), patch(
+        ) as download_cover, patch(
             "downloaders.douyin.make_download_engine",
         ) as media_engine, tempfile.TemporaryDirectory() as temp_name:
-            report = douyin.download_note(url, temp_name, cover_only=True)
+            report = douyin.download_note(
+                url,
+                temp_name,
+                cover_only=True,
+                organize_by_author=True,
+            )
 
         self.assertEqual(report["kind"], "cover")
+        self.assertEqual(Path(report["output_dir"]).name, "作者")
+        self.assertEqual(download_cover.call_args.args[2].name, "作者")
         browser_streams.assert_not_called()
         media_engine.assert_not_called()
 
@@ -266,12 +276,19 @@ class CoverOnlyPlatformTests(unittest.TestCase):
         ) as browser_streams, patch(
             "downloaders.xiaohongshu.download_cover_from_note",
             return_value=cover,
-        ), patch(
+        ) as download_cover, patch(
             "downloaders.xiaohongshu.make_download_engine",
         ) as media_engine, tempfile.TemporaryDirectory() as temp_name:
-            report = xiaohongshu.download_note(url, temp_name, cover_only=True)
+            report = xiaohongshu.download_note(
+                url,
+                temp_name,
+                cover_only=True,
+                organize_by_author=True,
+            )
 
         self.assertEqual(report["kind"], "cover")
+        self.assertEqual(Path(report["output_dir"]).name, "作者")
+        self.assertEqual(download_cover.call_args.args[1].name, "作者")
         browser_streams.assert_not_called()
         media_engine.assert_not_called()
 
@@ -298,14 +315,16 @@ class CoverOnlyPlatformTests(unittest.TestCase):
                 "filename": "cover.jpg",
                 "resolution": "1280x720",
             },
-        ):
+        ) as download_cover:
             report = youtube.download_cover_only(
                 info["webpage_url"],
                 Path(temp_name),
                 auth_context={"mode": "anonymous"},
+                organize_by_author=True,
             )
 
         ydl.extract_info.assert_called_once_with(info["webpage_url"], download=False)
+        self.assertEqual(download_cover.call_args.args[1], Path(temp_name) / "作者")
         self.assertEqual(report["kind"], "cover")
         self.assertEqual(report["output_path"], str(Path(temp_name) / "cover.jpg"))
 
@@ -332,10 +351,15 @@ class CoverOnlyPlatformTests(unittest.TestCase):
                 "filename": "cover.jpg",
                 "resolution": "1414x900",
             },
-        ):
-            report = bilibili.download_cover_only(url, Path(temp_name))
+        ) as download_cover:
+            report = bilibili.download_cover_only(
+                url,
+                Path(temp_name),
+                organize_by_author=True,
+            )
 
         ydl.extract_info.assert_called_once_with(url, download=False)
+        self.assertEqual(download_cover.call_args.args[1], Path(temp_name) / "作者")
         self.assertEqual(report["kind"], "cover")
 
     def test_tiktok_cover_only_extracts_metadata_without_media_download(self) -> None:
@@ -359,10 +383,15 @@ class CoverOnlyPlatformTests(unittest.TestCase):
                 "filename": "cover.jpg",
                 "resolution": "540x960",
             },
-        ):
-            report = tiktok.download_cover_only(url, Path(temp_name))
+        ) as download_cover:
+            report = tiktok.download_cover_only(
+                url,
+                Path(temp_name),
+                organize_by_author=True,
+            )
 
         ydl.extract_info.assert_called_once_with(url, download=False)
+        self.assertEqual(download_cover.call_args.args[1], Path(temp_name) / "作者")
         self.assertEqual(report["kind"], "cover")
 
 
@@ -426,6 +455,7 @@ class CoverDispatchTests(unittest.TestCase):
                 log=lambda _message: None,
             )
         self.assertTrue(download_collection.call_args.kwargs["download_cover"])
+        self.assertTrue(download_collection.call_args.kwargs["organize_by_author"])
 
     @patch("services.task_runner.xiaohongshu.download_collection")
     def test_xhs_collection_forwards_cover_option(self, download_collection) -> None:
@@ -444,6 +474,29 @@ class CoverDispatchTests(unittest.TestCase):
                 log=lambda _message: None,
             )
         self.assertTrue(download_collection.call_args.kwargs["download_cover"])
+        self.assertTrue(download_collection.call_args.kwargs["organize_by_author"])
+
+    def test_flat_output_option_is_forwarded(self) -> None:
+        with patch(
+            "services.task_runner.youtube.read_youtube_auth_context",
+            return_value={"mode": "anonymous"},
+        ), patch(
+            "services.task_runner.youtube.download_video",
+            return_value={"source_url": "yt"},
+        ) as download_video, tempfile.TemporaryDirectory() as temp_name:
+            report = run_task(
+                TaskOptions(
+                    platform="YouTube",
+                    feature="视频媒体",
+                    inputs=["https://youtu.be/7xTGNNLPyMI"],
+                    output_root=Path(temp_name),
+                    organize_by_author=False,
+                ),
+                log=lambda _message: None,
+            )
+
+        self.assertEqual(report["failures"], [])
+        self.assertFalse(download_video.call_args.kwargs["organize_by_author"])
 
     @patch("services.task_runner.youtube.read_youtube_auth_context")
     @patch("services.task_runner.youtube.download_video")
@@ -647,6 +700,7 @@ class CoverDispatchTests(unittest.TestCase):
             )
         self.assertEqual(report["failures"], [])
         self.assertTrue(mocked_download.call_args.kwargs["download_cover"])
+        self.assertTrue(mocked_download.call_args.kwargs["organize_by_author"])
 
 
 if __name__ == "__main__":
