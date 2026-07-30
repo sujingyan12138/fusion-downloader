@@ -195,6 +195,28 @@ class GuiThemeTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_article_platforms_are_available_and_disable_cover_controls(self) -> None:
+        root = app.UnifiedDownloaderApp()
+        root.withdraw()
+        try:
+            self.assertEqual(len(root.platform_buttons), 7)
+            self.assertIn("微信公众号", root.platform_combo.cget("values"))
+            self.assertIn("知乎", root.platform_combo.cget("values"))
+
+            root.platform_var.set("微信公众号")
+            root._on_platform_change()
+            self.assertEqual(root.feature_var.get(), "文章正文（MD）")
+            self.assertFalse(root.download_cover_var.get())
+            self.assertFalse(root.cover_only_var.get())
+            self.assertEqual(root.login_zhihu_button.winfo_manager(), "")
+
+            root.platform_var.set("知乎")
+            root._on_platform_change()
+            self.assertEqual(root.login_zhihu_button.winfo_manager(), "grid")
+            self.assertEqual(root.check_login_button.winfo_manager(), "")
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

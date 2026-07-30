@@ -271,3 +271,16 @@
 - 单作品、评论图片、仅封面和媒体附加封面都必须使用同一个作品作者目录；抖音/小红书收藏任务还需要把分类选项继续传给每个作品。
 - 按博主分类后的抖音长文章结构为 `下载结果/作者/正文.md` 与 `下载结果/作者/assets/...`，因此现有 `./assets/...` Markdown 相对路径保持有效。
 - 小红书收藏页在调用作品详情前只有 URL，无法可靠预判作者目录；分类模式下让单作品链路解析作者后执行已有文件判断，比递归扫描全部作者目录更准确。
+
+## 微信公众号与知乎文章 Markdown（2026-07-30）
+- 用户提供的微信公众号测试页 `https://mp.weixin.qq.com/s/xQc9wWAOlMqpnHL6Nqci4A` 由普通桌面浏览器请求返回 HTTP 200，正文容器为 `#js_content`，标题可由 `#activity-name`/`og:title` 获取，公众号名可由 `#js_name` 获取。
+- 该微信文章正文约 9,906 个可见字符、50 个 `<img>`，其中多数是 24/64 像素装饰图；正文主要配图声明宽度为 626、682、795。实现不能把所有小图标误报为正文图片。
+- 微信图片主要使用 `data-src` 懒加载，`mmbiz.qpic.cn/.../640` 可构造 `/0` 原图候选；必须下载并实际解码候选后再决定，不能只信 URL 后缀。
+- 知乎测试回答普通页面请求返回 HTTP 403，公开 API 同样返回 `code=40362`；全新软件浏览器配置也只得到异常请求 JSON，因此单纯 `requests` 或新建隐藏 Chrome 不是可靠方案。
+- 当前 Chrome/OpenCLI 会话能正常打开测试回答，标题为“怎样才能叫做真正会科研的人？”，目标回答节点 `name=2019195473999704632`，作者为“水木清华博士说”，正文位于目标回答内部 `.RichContent-inner/.RichText`。
+- 知乎实现应严格按回答 ID 定位目标 `.AnswerItem`，优先复用当前 Chrome/OpenCLI 会话，失败后使用软件专属 `知乎浏览器登录态/`；独立登录态仍被拦截时必须给出明确提示，不能输出 403 JSON 或整页导航为 Markdown。
+- 两个平台都应使用现有 `TaskOptions.organize_by_author` 和 `downloaders.paths.author_output_root()`，正文图片写入 Markdown 同级 `assets/` 并改写为 `./assets/...`。
+- 微信真实调度最终生成 13,542 字正文 Markdown，作者目录为 `大眼鱼/`；正文 3 张有效配图全部本地化，实际尺寸为 626×323、682×272、795×400，0 失败、0 缺失、0 远程图片引用。重复运行复用同一 Markdown 和 3 张图片。
+- 知乎真实调度通过当前 Chrome/OpenCLI 会话精确提取回答 `2019195473999704632`，作者目录为 `水木清华博士说/`，正文 Markdown 为 6,359 字，结尾完整到“更多精彩内容，可以移步公主号”；该回答正文没有配图。重复运行复用同一 Markdown。
+- 七个平台按钮在 1280×860 和应用最小 920×700 尺寸均无重叠；原“文章正文（Markdown）”会在功能下拉框中被截断，最终缩短为“文章正文（MD）”。
+- 新依赖 `beautifulsoup4` 和 `markdownify` 已进入 `requirements.txt`；最终 PyInstaller `PYZ-00.toc` 同时包含 `bs4`、`markdownify`、`downloaders.article_common`、`downloaders.wechat` 和 `downloaders.zhihu`。

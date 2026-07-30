@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from downloaders import bilibili, douyin, xiaohongshu, youtube
+from downloaders import bilibili, douyin, xiaohongshu, youtube, zhihu
 from downloaders.douyin_collection import DouyinCollectionError, list_collections, read_douyin_login_context
 from services.task_runner import TaskOptions, extract_task_inputs, run_task
 
@@ -32,6 +32,7 @@ XHS_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图片
 BILIBILI_FEATURES = ("视频媒体",)
 YOUTUBE_FEATURES = ("视频媒体",)
 TIKTOK_FEATURES = ("视频媒体",)
+ARTICLE_FEATURES = ("文章正文（MD）",)
 
 
 COLORS = {
@@ -295,7 +296,7 @@ class HeroBanner(tk.Canvas):
         self.create_text(
             36,
             93,
-            text="一个入口，保存五个平台的最高质量作品、封面与收藏内容。",
+            text="一个入口，保存七个平台的最高质量媒体、文章、封面与收藏内容。",
             anchor="nw",
             width=title_width,
             fill="#C5DED4",
@@ -698,6 +699,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.login_xhs_button: PillButton | None = None
         self.login_bilibili_button: PillButton | None = None
         self.login_youtube_button: PillButton | None = None
+        self.login_zhihu_button: PillButton | None = None
         self.check_login_button: PillButton | None = None
         self.open_output_button: PillButton | None = None
         self.choose_output_button: PillButton | None = None
@@ -1195,7 +1197,7 @@ class UnifiedDownloaderApp(tk.Tk):
             column=0,
             sticky="w",
         )
-        ttk.Label(brand, text="多平台媒体下载工作台", style="NavSubtitle.TLabel").grid(
+        ttk.Label(brand, text="多平台内容下载工作台", style="NavSubtitle.TLabel").grid(
             row=1,
             column=0,
             sticky="w",
@@ -1243,7 +1245,7 @@ class UnifiedDownloaderApp(tk.Tk):
             padding=(5, 5, 5, 5),
         )
         platform_strip.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        platforms = ("抖音", "小红书", "Bilibili", "YouTube", "TikTok")
+        platforms = ("抖音", "小红书", "Bilibili", "YouTube", "TikTok", "微信公众号", "知乎")
         for index, platform in enumerate(platforms):
             platform_strip.columnconfigure(index, weight=1, uniform="platform")
             button = ttk.Radiobutton(
@@ -1556,6 +1558,16 @@ class UnifiedDownloaderApp(tk.Tk):
             font=("Microsoft YaHei UI", 9),
         )
         self.login_youtube_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.login_zhihu_button = PillButton(
+            account_controls,
+            text="登录知乎",
+            command=self.open_zhihu_login,
+            canvas_bg=COLORS["surface_subtle"],
+            min_width=94,
+            height=38,
+            font=("Microsoft YaHei UI", 9),
+        )
+        self.login_zhihu_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
         self.check_login_button = PillButton(
             account_controls,
             text="检查登录状态",
@@ -1565,7 +1577,7 @@ class UnifiedDownloaderApp(tk.Tk):
             height=38,
             font=("Microsoft YaHei UI", 9),
         )
-        self.check_login_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        self.check_login_button.grid(row=0, column=5, sticky="w", padx=(8, 0))
         self.start_button = PillButton(
             action_bar,
             text="开始下载",
@@ -1963,7 +1975,27 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _on_platform_change(self) -> None:
         platform = self.platform_var.get()
-        if platform == "TikTok":
+        if platform in {"微信公众号", "知乎"}:
+            self.feature_combo.configure(values=ARTICLE_FEATURES)
+            self.feature_var.set("文章正文（MD）")
+            self.download_cover_var.set(False)
+            self.cover_only_var.set(False)
+            self.login_douyin_button.grid_remove()
+            self.login_xhs_button.grid_remove()
+            self.login_bilibili_button.grid_remove()
+            self.login_youtube_button.grid_remove()
+            self.check_login_button.grid_remove()
+            if platform == "知乎":
+                self.login_zhihu_button.grid()
+                self.login_status_label.configure(
+                    text="知乎：优先复用当前 Chrome 会话；请求受限时可点击“登录知乎”"
+                )
+            else:
+                self.login_zhihu_button.grid_remove()
+                self.login_status_label.configure(
+                    text="微信公众号：公开文章无需登录，将保存正文 Markdown 与本地图片"
+                )
+        elif platform == "TikTok":
             self.feature_combo.configure(values=TIKTOK_FEATURES)
             self.feature_var.set("视频媒体")
             self.run_mode_var.set("单个")
@@ -1971,6 +2003,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_xhs_button.grid_remove()
             self.login_bilibili_button.grid_remove()
             self.login_youtube_button.grid_remove()
+            self.login_zhihu_button.grid_remove()
             self.check_login_button.grid_remove()
             self.login_status_label.configure(text="TikTok：下载公开单作品最高质量；私密或受限内容暂不支持")
         elif platform == "YouTube":
@@ -1979,6 +2012,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_douyin_button.grid_remove()
             self.login_xhs_button.grid_remove()
             self.login_bilibili_button.grid_remove()
+            self.login_zhihu_button.grid_remove()
             self.login_youtube_button.grid()
             self.check_login_button.grid()
             auth_context = youtube.read_youtube_auth_context()
@@ -2001,6 +2035,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_douyin_button.grid_remove()
             self.login_xhs_button.grid_remove()
             self.login_youtube_button.grid_remove()
+            self.login_zhihu_button.grid_remove()
             self.login_bilibili_button.grid()
             self.check_login_button.grid()
             self.login_status_label.configure(text="Bilibili：未登录下载公开最高画质；登录后按账号权限选择最高画质")
@@ -2012,6 +2047,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_xhs_button.grid()
             self.login_bilibili_button.grid_remove()
             self.login_youtube_button.grid_remove()
+            self.login_zhihu_button.grid_remove()
             self.check_login_button.grid()
             self.login_status_label.configure(text="登录状态：需要下载收藏内容时请先登录小红书")
         else:
@@ -2022,6 +2058,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_xhs_button.grid_remove()
             self.login_bilibili_button.grid_remove()
             self.login_youtube_button.grid_remove()
+            self.login_zhihu_button.grid_remove()
             self.check_login_button.grid()
             self.login_status_label.configure(text="登录状态：需要下载收藏内容时请先登录抖音")
         self._on_feature_change()
@@ -2029,7 +2066,14 @@ class UnifiedDownloaderApp(tk.Tk):
     def _on_feature_change(self) -> None:
         is_xhs = self.platform_var.get() == "小红书"
         is_tiktok = self.platform_var.get() == "TikTok"
-        is_media_only = self.platform_var.get() in {"Bilibili", "YouTube", "TikTok"}
+        is_article = self.platform_var.get() in {"微信公众号", "知乎"}
+        is_media_only = self.platform_var.get() in {
+            "Bilibili",
+            "YouTube",
+            "TikTok",
+            "微信公众号",
+            "知乎",
+        }
         is_collection = self.feature_var.get() in {"收藏夹", "收藏视频", "收藏作品"}
         state = "readonly" if is_collection and not self.is_running else "disabled"
         entry_state = "normal" if is_collection and not is_xhs and not self.is_running else "disabled"
@@ -2052,6 +2096,13 @@ class UnifiedDownloaderApp(tk.Tk):
         self.engine_combo.configure(state=combo_state)
         self.comment_limit_entry.configure(state=regular_state)
         self.collection_limit_entry.configure(state=regular_state)
+        if is_article:
+            self.download_cover_var.set(False)
+            self.cover_only_var.set(False)
+            self.download_cover_check.configure(state="disabled")
+            self.cover_only_check.configure(state="disabled")
+        elif not self.is_running:
+            self.cover_only_check.configure(state="normal")
         if is_tiktok:
             self.run_mode_var.set("单个")
             self.mode_batch_radio.configure(state="disabled")
@@ -2061,9 +2112,14 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _on_cover_only_change(self) -> None:
         cover_only = self.cover_only_var.get()
+        is_article = self.platform_var.get() in {"微信公众号", "知乎"}
         if self.download_cover_check is not None:
             self.download_cover_check.configure(
-                state="disabled" if cover_only or self.is_running else "normal"
+                state="disabled" if cover_only or self.is_running or is_article else "normal"
+            )
+        if self.cover_only_check is not None:
+            self.cover_only_check.configure(
+                state="disabled" if self.is_running or is_article else "normal"
             )
         if not self.is_running:
             self.start_button.configure(text="下载封面" if cover_only else "开始下载")
@@ -2156,6 +2212,15 @@ class UnifiedDownloaderApp(tk.Tk):
             return
         self._append_log(f"已打开 Bilibili 登录窗口。登录成功后将复用：{profile_dir}\n")
         self.login_status_label.configure(text="登录状态：Bilibili 登录窗口已打开")
+
+    def open_zhihu_login(self) -> None:
+        try:
+            profile_dir = zhihu.open_zhihu_login_browser()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("打开失败", str(exc))
+            return
+        self._append_log(f"已打开知乎登录窗口。登录一次后将复用：{profile_dir}\n")
+        self.login_status_label.configure(text="知乎登录窗口已打开，登录完成后可直接重试下载")
 
     def open_youtube_auth_settings(self) -> None:
         dialog = tk.Toplevel(self)
@@ -2617,7 +2682,10 @@ class UnifiedDownloaderApp(tk.Tk):
         self._set_buttons_state("disabled")
         self._reset_stats(total=1 if options.feature in {"收藏夹", "收藏视频", "收藏作品"} else len(options.inputs))
         self.empty_state_label.configure(text="任务运行中，请等待下载完成。")
-        cover_mode = "仅下载封面" if options.cover_only else ("同时保存" if options.download_cover else "不保存")
+        if options.platform in {"微信公众号", "知乎"}:
+            cover_mode = "不适用"
+        else:
+            cover_mode = "仅下载封面" if options.cover_only else ("同时保存" if options.download_cover else "不保存")
         organization_mode = "按博主分类" if options.organize_by_author else "全部平铺"
         self._append_log(
             f"开始任务：平台={options.platform}，功能={options.feature}，"
@@ -2649,7 +2717,8 @@ class UnifiedDownloaderApp(tk.Tk):
         elif not collection_id:
             raise ValueError("请先刷新并选择收藏夹，或手动输入收藏夹 ID。")
 
-        cover_only = self.cover_only_var.get()
+        article_platform = platform in {"微信公众号", "知乎"}
+        cover_only = False if article_platform else self.cover_only_var.get()
         return TaskOptions(
             platform=platform,
             feature=feature,
@@ -2661,7 +2730,7 @@ class UnifiedDownloaderApp(tk.Tk):
             collection_limit=parse_positive_int(self.collection_limit_var.get(), "收藏作品数量" if platform == "小红书" else "收藏夹作品数量"),
             collection_id=collection_id,
             collection_name=collection_name,
-            download_cover=self.download_cover_var.get() or cover_only,
+            download_cover=False if article_platform else self.download_cover_var.get() or cover_only,
             cover_only=cover_only,
             organize_by_author=self.organize_by_author_var.get(),
         )
@@ -2867,6 +2936,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_xhs_button,
             self.login_bilibili_button,
             self.login_youtube_button,
+            self.login_zhihu_button,
             self.check_login_button,
         ):
             if button is not None:

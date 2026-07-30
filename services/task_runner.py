@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from downloaders import bilibili, douyin, tiktok, xiaohongshu, youtube
+from downloaders import bilibili, douyin, tiktok, wechat, xiaohongshu, youtube, zhihu
 from downloaders.douyin_collection import download_collection
 
 
@@ -30,7 +30,11 @@ class TaskOptions:
 
 
 def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
-    if platform == "TikTok":
+    if platform == "微信公众号":
+        urls = wechat.extract_urls(text)
+    elif platform == "知乎":
+        urls = zhihu.extract_urls(text)
+    elif platform == "TikTok":
         urls = tiktok.extract_urls(text)[:1]
     elif platform == "YouTube":
         urls = youtube.extract_urls(text)
@@ -46,6 +50,10 @@ def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
 
 
 def run_task(options: TaskOptions, log: LogFn) -> dict:
+    if options.platform == "微信公众号":
+        return run_article_urls(options, log, platform_label="微信公众号")
+    if options.platform == "知乎":
+        return run_article_urls(options, log, platform_label="知乎")
     if options.platform == "TikTok":
         return run_tiktok_url(options, log)
     if options.platform == "YouTube":
@@ -86,6 +94,51 @@ def run_task(options: TaskOptions, log: LogFn) -> dict:
         report["cover_failures"] = collect_collection_cover_failures(report)
         return report
     return run_douyin_urls(options, log)
+
+
+def run_article_urls(
+    options: TaskOptions,
+    log: LogFn,
+    *,
+    platform_label: str,
+) -> dict:
+    reports: list[dict] = []
+    failures: list[dict] = []
+    root = options.output_root
+    downloader = wechat if platform_label == "微信公众号" else zhihu
+
+    def run_one(index: int, url: str, per_item_workers: int) -> dict:
+        log(f"\n===== {platform_label}文章任务 {index}/{len(options.inputs)} =====")
+        log(url)
+        try:
+            report = downloader.download_article(
+                url,
+                root,
+                log=log,
+                max_workers=per_item_workers,
+                organize_by_author=options.organize_by_author,
+            )
+            return {"index": index, "url": url, "status": "ok", "report": report}
+        except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
+            message = str(exc)
+            log(f"任务失败：{message}")
+            return {"index": index, "url": url, "status": "failed", "error": message}
+
+    outer_workers, per_item_workers = split_url_workers(len(options.inputs), options.max_workers)
+    if len(options.inputs) > 1:
+        log(f"批量任务并发：文章 {outer_workers}，单文章图片 {per_item_workers}")
+    results = run_url_batch(options.inputs, outer_workers, per_item_workers, run_one)
+    for result in results:
+        if result.get("status") == "ok":
+            reports.append(result["report"])
+        else:
+            failures.append({"url": result.get("url", ""), "error": result.get("error", "")})
+    return {
+        "output_dir": str(root),
+        "items": reports,
+        "failures": failures,
+        "cover_failures": [],
+    }
 
 
 def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
