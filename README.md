@@ -1,6 +1,10 @@
 # 融合下载器
 
 Windows 本地 GUI，整合抖音、小红书、Bilibili、YouTube 和 TikTok 下载能力。
+## 界面展示
+
+![](./assets/image-20260730135249687.png)
+
 
 ## 功能
 
