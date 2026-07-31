@@ -21,6 +21,8 @@ from typing import Callable, Iterable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
+
+from downloaders.opencli_browser import OpenCliWindowGuard
 from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
@@ -1025,25 +1027,33 @@ def read_builtin_browser_comment_snapshot(url: str, limit: int | None = None) ->
 
 def read_opencli_comment_snapshot(opencli_path: str, url: str, limit: int | None = None) -> dict:
     session_name = f"douyin-comments-{uuid.uuid4().hex[:8]}"
+    window_guard = OpenCliWindowGuard()
     try:
         run_opencli(opencli_path, ["browser", session_name, "open", url], timeout=60)
+        window_guard.observe_owned_window()
         script = build_comment_image_snapshot_script(limit)
         stdout = run_opencli(opencli_path, ["browser", session_name, "eval", script], timeout=comment_browser_timeout(limit))
+        window_guard.observe_owned_window()
         data = parse_json_from_output(stdout)
         return data if isinstance(data, dict) else {}
     finally:
+        window_guard.observe_owned_window()
         try:
             run_opencli(opencli_path, ["browser", session_name, "close"], timeout=10)
         except Exception:
             pass
+        window_guard.close_released_window()
 
 
 def read_opencli_comment_api_snapshot(opencli_path: str, url: str, limit: int | None, logger: LogFn) -> dict:
     session_name = f"douyin-comment-api-{uuid.uuid4().hex[:8]}"
     max_images = max(20, int(limit or 5000))
+    window_guard = OpenCliWindowGuard()
     try:
         run_opencli(opencli_path, ["browser", session_name, "open", url], timeout=60)
+        window_guard.observe_owned_window()
         stdout = run_opencli(opencli_path, ["browser", session_name, "eval", build_comment_api_template_script()], timeout=75)
+        window_guard.observe_owned_window()
         data = parse_json_from_output(stdout)
         if not isinstance(data, dict):
             return {}
@@ -1057,10 +1067,12 @@ def read_opencli_comment_api_snapshot(opencli_path: str, url: str, limit: int | 
         data["apiTemplateFound"] = True
         return data
     finally:
+        window_guard.observe_owned_window()
         try:
             run_opencli(opencli_path, ["browser", session_name, "close"], timeout=10)
         except Exception:
             pass
+        window_guard.close_released_window()
 
 
 def collect_comment_api_images(template: str, max_images: int, cookie: str = "") -> list[dict]:

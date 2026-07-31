@@ -1993,7 +1993,7 @@ class UnifiedDownloaderApp(tk.Tk):
             else:
                 self.login_zhihu_button.grid_remove()
                 self.login_status_label.configure(
-                    text="微信公众号：公开文章无需登录，将保存正文 Markdown 与本地图片"
+                    text="微信公众号：支持公开文章和贴图，将保存文字 Markdown 与最高质量原图"
                 )
         elif platform == "TikTok":
             self.feature_combo.configure(values=TIKTOK_FEATURES)

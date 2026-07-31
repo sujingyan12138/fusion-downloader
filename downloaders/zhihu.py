@@ -22,6 +22,7 @@ from downloaders.article_common import (
     save_web_article,
 )
 from downloaders.covers import CoverCandidate
+from downloaders.opencli_browser import OpenCliWindowGuard
 
 
 URL_RE = re.compile(
@@ -218,27 +219,29 @@ def meta_content(node, selector: str) -> str:
 
 def extract_via_opencli(url: str) -> WebArticle:
     session = f"fusion-zhihu-{uuid.uuid4().hex[:10]}"
-    opened = False
+    window_guard = OpenCliWindowGuard()
     try:
         result = run_opencli(
             ["browser", session, "--window", "background", "open", url],
             timeout_seconds=60,
         )
-        opened = True
+        window_guard.observe_owned_window()
         current_url = str(result.get("url") or url)
         payload = run_opencli(
             ["browser", session, "eval", build_extract_script(current_url)],
             timeout_seconds=110,
         )
+        window_guard.observe_owned_window()
         return article_from_payload(payload, url)
     except subprocess.TimeoutExpired as exc:
         raise ZhihuDownloadError("OpenCLI 等待浏览器响应超时。") from exc
     finally:
-        if opened:
-            try:
-                run_opencli(["browser", session, "close"], timeout_seconds=15)
-            except (RuntimeError, subprocess.TimeoutExpired):
-                pass
+        window_guard.observe_owned_window()
+        try:
+            run_opencli(["browser", session, "close"], timeout_seconds=15)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            pass
+        window_guard.close_released_window()
 
 
 def extract_via_builtin_browser(url: str) -> WebArticle:

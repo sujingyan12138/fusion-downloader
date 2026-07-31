@@ -4,11 +4,11 @@ from io import BytesIO
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from downloaders import article_common, wechat, zhihu
+from downloaders import article_common, douyin, opencli_browser, wechat, zhihu
 from downloaders.covers import CoverCandidate, CoverProbe
 from services.task_runner import TaskOptions, extract_task_inputs, run_task
 
@@ -124,6 +124,22 @@ class WechatArticleTests(unittest.TestCase):
             ["https://mp.weixin.qq.com/s/abc_DEF-1"],
         )
 
+    def test_extracts_image_detail_url_with_complete_query(self) -> None:
+        url = (
+            "https://mp.weixin.qq.com/s?t=pages/image_detail&scene=1"
+            "&__biz=MzI4MDQ2Nzc0NA==&mid=2247483767&idx=1"
+            "&sn=5921455a4fa78de1dbcc2e9d93ca429e#wechat_redirect"
+        )
+        extracted = wechat.extract_urls(f"微信贴图：{url}")
+        self.assertEqual(len(extracted), 1)
+        self.assertNotIn("#wechat_redirect", extracted[0])
+        self.assertTrue(wechat.is_image_detail_url(extracted[0]))
+        self.assertIn("mid=2247483767", extracted[0])
+        self.assertNotIn(
+            "poc_token",
+            wechat.canonicalize_url(extracted[0] + "&poc_token=temporary"),
+        )
+
     def test_parses_only_js_content_and_prefers_account_name(self) -> None:
         html = """
         <html><head><meta property="og:title" content="测试微信文章"></head>
@@ -151,6 +167,121 @@ class WechatArticleTests(unittest.TestCase):
         )
         self.assertTrue(candidates[0].url.startswith("https://mmbiz.qpic.cn/path/0?"))
         self.assertGreater(candidates[0].preference, candidates[1].preference)
+
+    def test_image_detail_parser_keeps_gallery_and_excludes_page_chrome(self) -> None:
+        html = """
+        <html><head><title>陪孩子旅行的记录</title></head><body>
+          <div id="js_wx_follow_nickname"><span class="nickNameSpan">项琴</span></div>
+          <div id="img_swiper_content">
+            <div class="swiper_item"><img src="https://mmbiz.qpic.cn/a/0?wx_fmt=jpg"></div>
+            <div class="swiper_item"><img src="https://mmbiz.qpic.cn/b/0?watermark=1"></div>
+            <div class="swiper_item"><img src="https://mmbiz.qpic.cn/a/0?wx_fmt=jpg"></div>
+          </div>
+          <div id="js_content"><div id="js_image_content">
+            <p id="js_image_desc">这是一段足够长的微信贴图文字内容，用于验证作品正文与画廊图片能够被一起保存。</p>
+          </div></div>
+          <img class="wx_follow_avatar_pic" src="https://mmbiz.qpic.cn/avatar/0">
+        </body></html>
+        """
+        url = (
+            "https://mp.weixin.qq.com/s?t=pages/image_detail"
+            "&__biz=test&mid=123&idx=1&sn=abc"
+        )
+        article = wechat.parse_article_html(html, url)
+        parsed_body = article_common.BeautifulSoup(article.body_html, "html.parser")
+
+        self.assertEqual(article.platform, "微信贴图")
+        self.assertEqual(article.source_type, "wechat_image_post")
+        self.assertEqual(article.author, "项琴")
+        self.assertEqual(len(parsed_body.find_all("img")), 2)
+        self.assertNotIn("avatar", article.body_html)
+        self.assertIn("作品正文", article.body_html)
+
+    def test_qpic_clean_original_removes_watermark_and_preview_parameters(self) -> None:
+        soup = article_common.BeautifulSoup(
+            "<img src='https://mmbiz.qpic.cn/path/640?"
+            "wxfrom=12&amp;wx_fmt=jpg&amp;tp=webp&amp;watermark=1'>",
+            "html.parser",
+        )
+        candidates = wechat.wechat_image_candidates(
+            soup.img,
+            "https://mp.weixin.qq.com/s/test",
+        )
+        self.assertEqual(
+            candidates[0].url,
+            "https://mmbiz.qpic.cn/path/0?wx_fmt=jpg",
+        )
+        self.assertFalse(candidates[0].watermark)
+        self.assertTrue(candidates[1].watermark)
+
+    @patch("downloaders.wechat.extract_via_opencli")
+    @patch("downloaders.wechat.opencli_command", return_value=["opencli"])
+    @patch("downloaders.wechat.requests.get")
+    def test_captcha_response_falls_back_to_current_chrome(
+        self,
+        requests_get,
+        _opencli_command,
+        extract_via_opencli,
+    ) -> None:
+        response = Mock(
+            status_code=200,
+            apparent_encoding="utf-8",
+            encoding="utf-8",
+            text="<html>访问验证</html>",
+            url="https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=x",
+        )
+        requests_get.return_value = response
+        expected = article_common.WebArticle(
+            platform="微信贴图",
+            source_type="wechat_image_post",
+            source_url="https://mp.weixin.qq.com/s?t=pages/image_detail",
+            canonical_url="https://mp.weixin.qq.com/s?t=pages/image_detail",
+            content_id="abc",
+            title="贴图标题",
+            author="作者",
+            body_html="<p>这是足够长的贴图正文内容，用来验证浏览器回退。</p>",
+        )
+        extract_via_opencli.return_value = expected
+
+        article = wechat.fetch_article(
+            "https://mp.weixin.qq.com/s?t=pages/image_detail"
+        )
+        self.assertIs(article, expected)
+        extract_via_opencli.assert_called_once()
+
+    @patch("downloaders.wechat.OpenCliWindowGuard")
+    @patch("downloaders.wechat.run_opencli_json")
+    def test_wechat_opencli_session_releases_owned_window(
+        self,
+        run_opencli_json,
+        window_guard_type,
+    ) -> None:
+        page_url = (
+            "https://mp.weixin.qq.com/s?t=pages/image_detail"
+            "&__biz=test&mid=123&idx=1&sn=abc"
+        )
+        html = """
+        <title>贴图标题</title><div id="js_name">作者</div>
+        <div id="img_swiper_content"><div class="swiper_item">
+          <img src="https://mmbiz.qpic.cn/a/0?wx_fmt=jpg">
+        </div></div>
+        <div id="js_content"><div id="js_image_content">
+          <p id="js_image_desc">这是足够长的贴图正文内容，用来验证浏览器窗口释放流程。</p>
+        </div></div>
+        """
+        run_opencli_json.side_effect = [
+            {"url": page_url},
+            {"url": page_url, "html": html},
+            {},
+        ]
+
+        article = wechat.extract_via_opencli(page_url)
+        self.assertEqual(article.source_type, "wechat_image_post")
+        self.assertEqual(
+            run_opencli_json.call_args_list[-1].args[0][-1],
+            "close",
+        )
+        window_guard_type.return_value.close_released_window.assert_called_once_with()
 
 
 class ZhihuArticleTests(unittest.TestCase):
@@ -190,6 +321,143 @@ class ZhihuArticleTests(unittest.TestCase):
         self.assertEqual(article.author, "目标作者")
         self.assertIn("目标回答", article.body_html)
         self.assertNotIn("错误回答", article.body_html)
+
+    @patch("downloaders.zhihu.OpenCliWindowGuard")
+    @patch("downloaders.zhihu.run_opencli")
+    def test_opencli_session_always_releases_and_closes_owned_window(
+        self,
+        run_opencli,
+        window_guard_type,
+    ) -> None:
+        run_opencli.side_effect = [
+            {"url": "https://www.zhihu.com/question/999/answer/222"},
+            {
+                "title": "问题标题",
+                "author": "目标作者",
+                "bodyHtml": (
+                    "<p>目标回答的完整正文内容，长度足够通过正文完整性检查，"
+                    "并验证浏览器清理不会改变文章提取结果。</p>"
+                ),
+                "answerId": "222",
+                "questionId": "999",
+            },
+            {},
+        ]
+        article = zhihu.extract_via_opencli(
+            "https://www.zhihu.com/question/999/answer/222"
+        )
+
+        self.assertEqual(article.content_id, "222")
+        self.assertEqual(
+            run_opencli.call_args_list[-1].args[0][-1],
+            "close",
+        )
+        self.assertGreaterEqual(
+            window_guard_type.return_value.observe_owned_window.call_count,
+            2,
+        )
+        window_guard_type.return_value.close_released_window.assert_called_once_with()
+
+
+class OpenCliWindowGuardTests(unittest.TestCase):
+    def window(self, handle: int, title: str) -> opencli_browser.BrowserWindow:
+        return opencli_browser.BrowserWindow(handle, title, "chrome.exe")
+
+    @patch("downloaders.opencli_browser._request_window_close", return_value=True)
+    @patch("downloaders.opencli_browser._browser_windows")
+    def test_closes_reused_blank_window_after_release(
+        self,
+        browser_windows,
+        request_close,
+    ) -> None:
+        browser_windows.side_effect = [
+            {10: self.window(10, "about:blank - Google Chrome")},
+            {10: self.window(10, "问题标题 - 知乎 - Google Chrome")},
+            {10: self.window(10, "about:blank - Google Chrome")},
+            {},
+        ]
+        guard = opencli_browser.OpenCliWindowGuard()
+
+        self.assertEqual(guard.observe_owned_window(), 10)
+        self.assertTrue(guard.close_released_window(timeout_seconds=0.1))
+        request_close.assert_called_once_with(10)
+
+    @patch("downloaders.opencli_browser._request_window_close")
+    @patch("downloaders.opencli_browser._browser_windows")
+    def test_never_closes_preexisting_user_window(
+        self,
+        browser_windows,
+        request_close,
+    ) -> None:
+        browser_windows.side_effect = [
+            {10: self.window(10, "用户正在阅读的页面 - Google Chrome")},
+            {10: self.window(10, "知乎文章 - Google Chrome")},
+        ]
+        guard = opencli_browser.OpenCliWindowGuard()
+
+        self.assertIsNone(guard.observe_owned_window())
+        self.assertFalse(guard.close_released_window(timeout_seconds=0))
+        request_close.assert_not_called()
+
+    @patch("downloaders.opencli_browser._request_window_close")
+    @patch("downloaders.opencli_browser._browser_windows")
+    def test_ambiguous_new_windows_fail_closed(
+        self,
+        browser_windows,
+        request_close,
+    ) -> None:
+        browser_windows.side_effect = [
+            {},
+            {
+                10: self.window(10, "知乎文章 - Google Chrome"),
+                20: self.window(20, "用户新开的窗口 - Google Chrome"),
+            },
+        ]
+        guard = opencli_browser.OpenCliWindowGuard()
+
+        self.assertIsNone(guard.observe_owned_window())
+        self.assertFalse(guard.close_released_window(timeout_seconds=0))
+        request_close.assert_not_called()
+
+
+class DouyinOpenCliWindowTests(unittest.TestCase):
+    @patch("downloaders.douyin.OpenCliWindowGuard")
+    @patch("downloaders.douyin.run_opencli")
+    def test_comment_snapshot_releases_and_closes_owned_window(
+        self,
+        run_opencli,
+        window_guard_type,
+    ) -> None:
+        run_opencli.side_effect = ["{}", '{"commentImages": []}', "{}"]
+
+        result = douyin.read_opencli_comment_snapshot(
+            "C:/tools/opencli.cmd",
+            "https://www.douyin.com/video/123",
+        )
+
+        self.assertEqual(result, {"commentImages": []})
+        self.assertEqual(run_opencli.call_args_list[-1].args[1][-1], "close")
+        window_guard_type.return_value.close_released_window.assert_called_once_with()
+
+    @patch("downloaders.douyin.OpenCliWindowGuard")
+    @patch("downloaders.douyin.run_opencli")
+    def test_comment_api_snapshot_releases_and_closes_owned_window(
+        self,
+        run_opencli,
+        window_guard_type,
+    ) -> None:
+        run_opencli.side_effect = ["{}", '{"template": ""}', "{}"]
+
+        result = douyin.read_opencli_comment_api_snapshot(
+            "C:/tools/opencli.cmd",
+            "https://www.douyin.com/video/123",
+            20,
+            lambda _message: None,
+        )
+
+        self.assertEqual(result, {"template": ""})
+        self.assertEqual(run_opencli.call_args_list[-1].args[1][-1], "close")
+        window_guard_type.return_value.close_released_window.assert_called_once_with()
 
 
 class ArticleDispatchTests(unittest.TestCase):

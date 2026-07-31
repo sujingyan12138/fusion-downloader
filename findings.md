@@ -284,3 +284,20 @@
 - 知乎真实调度通过当前 Chrome/OpenCLI 会话精确提取回答 `2019195473999704632`，作者目录为 `水木清华博士说/`，正文 Markdown 为 6,359 字，结尾完整到“更多精彩内容，可以移步公主号”；该回答正文没有配图。重复运行复用同一 Markdown。
 - 七个平台按钮在 1280×860 和应用最小 920×700 尺寸均无重叠；原“文章正文（Markdown）”会在功能下拉框中被截断，最终缩短为“文章正文（MD）”。
 - 新依赖 `beautifulsoup4` 和 `markdownify` 已进入 `requirements.txt`；最终 PyInstaller `PYZ-00.toc` 同时包含 `bs4`、`markdownify`、`downloaders.article_common`、`downloaders.wechat` 和 `downloaders.zhihu`。
+
+## OpenCLI 下载窗口自动清理（2026-07-30）
+- OpenCLI 1.8.3 的 `browser <session> close` 帮助与源码都明确表示“释放当前浏览器会话标签租约”；真实运行后，知乎/测试标签页被释放，但同一个 `OpenCLI Browser` 窗口会恢复为 `about:blank` 并继续显示。
+- 受控探针确认 OpenCLI 会复用既有的 `about:blank` 自动化窗口：窗口句柄在打开前后保持不变，标题从 `about:blank - Google Chrome` 变为目标网页标题，执行 `browser close` 后又恢复为空白。
+- 不能按 `chrome.exe` 进程终止：OpenCLI 自动化窗口与用户正常知乎页面、翻译窗口共享同一个 Chrome 主进程。安全边界必须精确到顶层窗口句柄。
+- 项目中需要补同类清理的只有知乎正文与抖音评论 OpenCLI 会话；抖音、小红书、Bilibili 和知乎的内置 CDP 路径已经只终止本次启动且未复用的进程，平台登录按钮与 YouTube 教程窗口则按设计保留给用户操作。
+- 实现只接受单一可信候选：本轮新建的 Chrome/Edge 顶层窗口，或打开前为 `about:blank` 且打开后变为目标页的窗口。执行 OpenCLI 释放后再次确认同一句柄已回到 `about:blank`，才发送正常 `WM_CLOSE`；多候选或标题不符时不关闭。
+- 真实知乎回答 `2019195473999704632` 再次提取成功，标题、作者和正文 ID 正确；提取前后的两个用户 Chrome 窗口句柄和标题完全一致，新增 OpenCLI 窗口为 0，`about:blank` 残留为 0。
+- 最终 PyInstaller 归档包含 `downloaders.opencli_browser`、`downloaders.zhihu` 与 `downloaders.douyin`；正式中文 EXE 可见、响应并通过正常窗口关闭退出，未遗留运行进程。
+
+## 微信视频号边界与贴图页面结构（2026-07-31）
+- 视频号测试短链跳转到 `channels.weixin.qq.com/finder-preview/pages/sph`；公开 `get_feed_info` 只返回作者、说明、封面与动态导出 ID，测试页明确要求扫码到微信观看，没有返回 `videoUrl`、H.264/H.265 候选或可验证媒体流。
+- 当前可复核的开源实现要取得视频号真实媒体，均依赖电脑微信播放、MITM 本地代理、根证书和视频流解密；这不是可靠的“粘贴分享链接直接下载”，并会引入系统网络与证书回滚风险。用户指定“难则只实现贴图”，因此本阶段不实现视频号，也不把封面伪装成下载成功。
+- 贴图测试页的文字位于 `#js_image_desc`，作品图片位于页面上方 `#img_swiper_content .swiper_item img`，不在普通文章的 `#js_content` 内；作者在动态渲染的 `#js_wx_follow_nickname`。
+- 无状态 HTTP 请求会跳转 `wappoc_appmsgcaptcha`；当前 Chrome/OpenCLI 会话能完整渲染正文与画廊。页面首图先出现、其余图片和作者稍后渲染，因此不能在首个图片节点出现时立即快照，需等待正文长度、作者与去重画廊数量连续稳定。
+- 测试作品实际画廊为 3 张：2560×3840、2560×3840、2560×1706。带 `watermark=1`/`tp=webp` 的 qpic URL 去掉临时参数后仍返回同像素 JPEG，可作为非水印原图候选；最终仍由实际解码与候选评分决定。
+- Chrome 页面每次可能追加不同 `poc_token`；若写入 canonical URL，会导致相同内容的 Markdown 每次不同。只剔除该临时参数后，第二次运行可复用相同 Markdown 与全部图片。
