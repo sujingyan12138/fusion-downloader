@@ -44,7 +44,7 @@ $argsList += @("--add-binary", "$($ffmpeg.Source);.")
 
 $ffprobe = Get-Command ffprobe.exe -ErrorAction SilentlyContinue
 if (-not $ffprobe) {
-    throw "ffprobe.exe was not found. Packaging stopped because packaged Bilibili, YouTube, and TikTok downloads must verify both video and audio streams."
+    throw "ffprobe.exe was not found. Packaging stopped because packaged Bilibili, YouTube, TikTok, and WeChat Channels downloads must verify both video and audio streams."
 }
 $argsList += @("--add-binary", "$($ffprobe.Source);.")
 

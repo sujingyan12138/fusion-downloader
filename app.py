@@ -33,6 +33,7 @@ BILIBILI_FEATURES = ("视频媒体",)
 YOUTUBE_FEATURES = ("视频媒体",)
 TIKTOK_FEATURES = ("视频媒体",)
 ARTICLE_FEATURES = ("文章正文（MD）",)
+WECHAT_FEATURES = ("自动识别（视频/图文）",)
 
 
 COLORS = {
@@ -1245,7 +1246,7 @@ class UnifiedDownloaderApp(tk.Tk):
             padding=(5, 5, 5, 5),
         )
         platform_strip.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        platforms = ("抖音", "小红书", "Bilibili", "YouTube", "TikTok", "微信公众号", "知乎")
+        platforms = ("抖音", "小红书", "Bilibili", "YouTube", "TikTok", "微信", "知乎")
         for index, platform in enumerate(platforms):
             platform_strip.columnconfigure(index, weight=1, uniform="platform")
             button = ttk.Radiobutton(
@@ -1975,9 +1976,14 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _on_platform_change(self) -> None:
         platform = self.platform_var.get()
-        if platform in {"微信公众号", "知乎"}:
-            self.feature_combo.configure(values=ARTICLE_FEATURES)
-            self.feature_var.set("文章正文（MD）")
+        is_wechat = platform in {"微信", "微信公众号"}
+        if is_wechat or platform == "知乎":
+            self.feature_combo.configure(
+                values=WECHAT_FEATURES if is_wechat else ARTICLE_FEATURES
+            )
+            self.feature_var.set(
+                "自动识别（视频/图文）" if is_wechat else "文章正文（MD）"
+            )
             self.download_cover_var.set(False)
             self.cover_only_var.set(False)
             self.login_douyin_button.grid_remove()
@@ -1993,7 +1999,7 @@ class UnifiedDownloaderApp(tk.Tk):
             else:
                 self.login_zhihu_button.grid_remove()
                 self.login_status_label.configure(
-                    text="微信公众号：支持公开文章和贴图，将保存文字 Markdown 与最高质量原图"
+                    text="微信：自动识别视频号、公开文章和贴图；视频号选择原始最高质量"
                 )
         elif platform == "TikTok":
             self.feature_combo.configure(values=TIKTOK_FEATURES)
@@ -2066,11 +2072,12 @@ class UnifiedDownloaderApp(tk.Tk):
     def _on_feature_change(self) -> None:
         is_xhs = self.platform_var.get() == "小红书"
         is_tiktok = self.platform_var.get() == "TikTok"
-        is_article = self.platform_var.get() in {"微信公众号", "知乎"}
+        is_article = self.platform_var.get() in {"微信", "微信公众号", "知乎"}
         is_media_only = self.platform_var.get() in {
             "Bilibili",
             "YouTube",
             "TikTok",
+            "微信",
             "微信公众号",
             "知乎",
         }
@@ -2112,7 +2119,7 @@ class UnifiedDownloaderApp(tk.Tk):
 
     def _on_cover_only_change(self) -> None:
         cover_only = self.cover_only_var.get()
-        is_article = self.platform_var.get() in {"微信公众号", "知乎"}
+        is_article = self.platform_var.get() in {"微信", "微信公众号", "知乎"}
         if self.download_cover_check is not None:
             self.download_cover_check.configure(
                 state="disabled" if cover_only or self.is_running or is_article else "normal"
@@ -2682,7 +2689,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self._set_buttons_state("disabled")
         self._reset_stats(total=1 if options.feature in {"收藏夹", "收藏视频", "收藏作品"} else len(options.inputs))
         self.empty_state_label.configure(text="任务运行中，请等待下载完成。")
-        if options.platform in {"微信公众号", "知乎"}:
+        if options.platform in {"微信", "微信公众号", "知乎"}:
             cover_mode = "不适用"
         else:
             cover_mode = "仅下载封面" if options.cover_only else ("同时保存" if options.download_cover else "不保存")
@@ -2717,7 +2724,7 @@ class UnifiedDownloaderApp(tk.Tk):
         elif not collection_id:
             raise ValueError("请先刷新并选择收藏夹，或手动输入收藏夹 ID。")
 
-        article_platform = platform in {"微信公众号", "知乎"}
+        article_platform = platform in {"微信", "微信公众号", "知乎"}
         cover_only = False if article_platform else self.cover_only_var.get()
         return TaskOptions(
             platform=platform,

@@ -200,12 +200,12 @@ class GuiThemeTests(unittest.TestCase):
         root.withdraw()
         try:
             self.assertEqual(len(root.platform_buttons), 7)
-            self.assertIn("微信公众号", root.platform_combo.cget("values"))
+            self.assertIn("微信", root.platform_combo.cget("values"))
             self.assertIn("知乎", root.platform_combo.cget("values"))
 
-            root.platform_var.set("微信公众号")
+            root.platform_var.set("微信")
             root._on_platform_change()
-            self.assertEqual(root.feature_var.get(), "文章正文（MD）")
+            self.assertEqual(root.feature_var.get(), "自动识别（视频/图文）")
             self.assertFalse(root.download_cover_var.get())
             self.assertFalse(root.cover_only_var.get())
             self.assertEqual(root.login_zhihu_button.winfo_manager(), "")
