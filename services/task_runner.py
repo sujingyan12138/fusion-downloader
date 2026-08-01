@@ -16,6 +16,8 @@ from downloaders import (
     zhihu,
 )
 from downloaders.douyin_collection import download_collection
+from services.cancellation import DownloadCancelled, raise_if_cancelled
+from services.network_policy import bypass_unreachable_loopback_proxy
 
 
 LogFn = Callable[[str], None]
@@ -63,6 +65,16 @@ def extract_task_inputs(platform: str, text: str, single: bool) -> list[str]:
 
 
 def run_task(options: TaskOptions, log: LogFn) -> dict:
+    probe_url = next(
+        (value for value in options.inputs if value.startswith(("http://", "https://"))),
+        "https://www.douyin.com/",
+    )
+    with bypass_unreachable_loopback_proxy(log, probe_url=probe_url):
+        raise_if_cancelled()
+        return _run_task(options, log)
+
+
+def _run_task(options: TaskOptions, log: LogFn) -> dict:
     if options.platform in WECHAT_PLATFORMS:
         return run_wechat_urls(options, log)
     if options.platform == "知乎":
@@ -137,6 +149,8 @@ def run_wechat_urls(options: TaskOptions, log: LogFn) -> dict:
                     organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
             log(f"任务失败：{message}")
@@ -195,6 +209,8 @@ def run_article_urls(
                 organize_by_author=options.organize_by_author,
             )
             return {"index": index, "url": url, "status": "ok", "report": report}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
             log(f"任务失败：{message}")
@@ -268,6 +284,8 @@ def run_tiktok_url(options: TaskOptions, log: LogFn) -> dict:
             "failures": [],
             "cover_failures": collect_cover_failures([report], [url]),
         }
+    except DownloadCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001 - return a GUI-readable failure report.
         message = str(exc)
         log(f"任务失败：{message}")
@@ -320,6 +338,8 @@ def run_youtube_urls(options: TaskOptions, log: LogFn) -> dict:
                     organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
             log(f"任务失败：{message}")
@@ -385,6 +405,8 @@ def run_bilibili_urls(options: TaskOptions, log: LogFn) -> dict:
                     organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
             log(f"任务失败：{message}")
@@ -470,6 +492,8 @@ def run_douyin_urls(options: TaskOptions, log: LogFn) -> dict:
                     organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
             log(f"任务失败：{message}")
@@ -553,6 +577,8 @@ def run_xhs_urls(options: TaskOptions, log: LogFn) -> dict:
                     organize_by_author=options.organize_by_author,
                 )
             return {"index": index, "url": url, "status": "ok", "report": report}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - aggregate task failures for GUI.
             message = str(exc)
             log(f"任务失败：{message}")
@@ -632,10 +658,22 @@ def run_url_batch(
     worker: Callable[[int, str, int], dict],
 ) -> list[dict]:
     if outer_workers <= 1:
-        return [worker(index, url, per_item_workers) for index, url in enumerate(inputs, start=1)]
+        results = []
+        for index, url in enumerate(inputs, start=1):
+            raise_if_cancelled()
+            results.append(worker(index, url, per_item_workers))
+        return results
     results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=outer_workers) as executor:
-        futures = [executor.submit(worker, index, url, per_item_workers) for index, url in enumerate(inputs, start=1)]
+    executor = ThreadPoolExecutor(max_workers=outer_workers)
+    futures = [executor.submit(worker, index, url, per_item_workers) for index, url in enumerate(inputs, start=1)]
+    try:
         for future in as_completed(futures):
+            raise_if_cancelled()
             results.append(future.result())
+    except DownloadCancelled:
+        for future in futures:
+            future.cancel()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
     return sorted(results, key=lambda item: item.get("index", 0))

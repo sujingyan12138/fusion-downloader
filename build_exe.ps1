@@ -26,6 +26,12 @@ if (-not (Test-Path -LiteralPath $icon)) {
 $argsList += @("--icon", $icon)
 $argsList += @("--add-data", "$icon;.")
 
+$updateHelper = Join-Path $PSScriptRoot "fusion_update_helper.ps1"
+if (-not (Test-Path -LiteralPath $updateHelper)) {
+    throw "fusion_update_helper.ps1 was not found. Packaging stopped because safe self-update requires the helper."
+}
+$argsList += @("--add-data", "$updateHelper;.")
+
 $argsList += @("--collect-all", "yt_dlp")
 $argsList += @("--collect-all", "yt_dlp_ejs")
 $argsList += @("--collect-all", "curl_cffi")
@@ -51,4 +57,25 @@ $argsList += @("--add-binary", "$($ffprobe.Source);.")
 $argsList += "app.py"
 
 & $python @argsList
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE."
+}
+
+$builtExe = Join-Path $PSScriptRoot "dist\$exeName.exe"
+$releaseExe = Join-Path $PSScriptRoot "dist\Fusion.Downloader.exe"
+if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) {
+    throw "PyInstaller reported success but the expected executable was not created: $builtExe"
+}
+Copy-Item -LiteralPath $builtExe -Destination $releaseExe -Force
+$sha256 = [Security.Cryptography.SHA256]::Create()
+$releaseStream = [IO.File]::OpenRead($releaseExe)
+try {
+    $releaseHash = -join ($sha256.ComputeHash($releaseStream) | ForEach-Object { $_.ToString("x2") })
+}
+finally {
+    $releaseStream.Dispose()
+    $sha256.Dispose()
+}
 Write-Host "Build complete: dist\$exeName.exe"
+Write-Host "Release asset: dist\Fusion.Downloader.exe"
+Write-Host "SHA-256: $releaseHash"

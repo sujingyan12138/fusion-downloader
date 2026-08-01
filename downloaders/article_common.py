@@ -15,6 +15,7 @@ import requests
 
 from downloaders.covers import CoverCandidate, CoverDownloadError, CoverProbe, probe_cover
 from downloaders.paths import author_output_root
+from services.cancellation import DownloadCancelled, raise_if_cancelled
 
 
 LogFn = Callable[[str], None]
@@ -204,6 +205,7 @@ def normalize_article_body(
     failures: list[dict] = []
 
     def download_one(group: dict) -> dict:
+        raise_if_cancelled()
         index = int(group["index"])
         best = choose_best_article_image(
             group["candidates"],
@@ -254,6 +256,7 @@ def normalize_article_body(
                 for group in groups
             }
             for future in as_completed(future_groups):
+                raise_if_cancelled()
                 group = future_groups[future]
                 try:
                     report = future.result()
@@ -271,6 +274,10 @@ def normalize_article_body(
                         if not clean_text(image.get("alt")):
                             image["alt"] = f"正文配图 {report['index']}"
                         clean_image_attributes(image)
+                except DownloadCancelled:
+                    for pending in future_groups:
+                        pending.cancel()
+                    raise
                 except Exception as exc:  # noqa: BLE001 - retain a working remote image.
                     failure = {"index": group["index"], "url": group["remote"], "error": str(exc)}
                     failures.append(failure)
@@ -322,6 +329,7 @@ def choose_best_article_image(
     failures: list[str] = []
     try:
         for candidate in candidates[:8]:
+            raise_if_cancelled()
             try:
                 result = probe_cover(session, candidate, referer)
             except CoverDownloadError as exc:
@@ -342,6 +350,8 @@ def clean_image_attributes(image: Tag) -> None:
         "data-actualsrc",
         "data-src",
         "data-backsrc",
+        "data-watermark-src",
+        "data-original-size",
         "data-type",
         "data-w",
         "data-ratio",

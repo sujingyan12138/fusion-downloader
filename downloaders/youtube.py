@@ -20,6 +20,7 @@ from yt_dlp.utils import DownloadError
 
 from . import covers
 from .paths import author_output_root
+from services.cancellation import DownloadCancelled, cancellation_requested, raise_if_cancelled
 
 LogFn = Callable[[str], None]
 
@@ -562,6 +563,7 @@ def download_video(
     organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
+    raise_if_cancelled()
     url = extract_url(url)
     ffmpeg = find_executable("ffmpeg")
     ffprobe = find_executable("ffprobe")
@@ -652,6 +654,8 @@ def download_video(
     except YouTubeDownloadError:
         raise
     except (CookieLoadError, DownloadError) as exc:
+        if cancellation_requested():
+            raise DownloadCancelled("用户已终止下载。") from exc
         raise YouTubeDownloadError(_friendly_download_error(exc)) from exc
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise YouTubeDownloadError(f"YouTube 视频处理失败：{exc}") from exc
@@ -849,6 +853,7 @@ def download_parallel_stream(
     try:
         with target.open("r+b") as output:
             for future in as_completed(futures):
+                raise_if_cancelled()
                 start, data = future.result()
                 output.seek(start)
                 output.write(data)
@@ -859,6 +864,11 @@ def download_parallel_stream(
                     elapsed = max(time.monotonic() - started, 0.001)
                     speed = completed / 1024 / 1024 / elapsed
                     logger(f"{label}流下载进度：{percent}%（{speed:.2f} MiB/s）")
+    except DownloadCancelled:
+        for future in futures:
+            future.cancel()
+        target.unlink(missing_ok=True)
+        raise
     except Exception as exc:
         for future in futures:
             future.cancel()
@@ -888,6 +898,7 @@ def _download_range_chunk(
     expected = end - start + 1
     last_error: Exception | None = None
     for attempt in range(RANGE_RETRIES + 1):
+        raise_if_cancelled()
         request_headers = dict(headers)
         request_headers["Range"] = f"bytes={start}-{end}"
         try:
@@ -901,7 +912,12 @@ def _download_range_chunk(
                     raise requests.ConnectionError(
                         f"Content-Range 不匹配：预期 {start}-{end}，实际 {range_start}-{range_end}"
                     )
-                data = b"".join(chunk for chunk in response.iter_content(256 * 1024) if chunk)
+                chunks: list[bytes] = []
+                for chunk in response.iter_content(256 * 1024):
+                    raise_if_cancelled()
+                    if chunk:
+                        chunks.append(chunk)
+                data = b"".join(chunks)
                 if len(data) != expected:
                     raise requests.ConnectionError(
                         f"分段长度不完整：预期 {expected}，实际 {len(data)}"
@@ -1271,6 +1287,7 @@ class _ProgressHook:
         self._last_percent: dict[str, int] = {}
 
     def __call__(self, status: dict) -> None:
+        raise_if_cancelled()
         state = str(status.get("status") or "")
         if state == "downloading":
             if not self._started:

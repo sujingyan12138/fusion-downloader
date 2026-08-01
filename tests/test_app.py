@@ -132,6 +132,15 @@ class GuiThemeTests(unittest.TestCase):
                 ],
             )
 
+    def test_manual_update_button_shows_current_version(self) -> None:
+        root = app.UnifiedDownloaderApp()
+        root.withdraw()
+        try:
+            self.assertIsNotNone(root.update_button)
+            self.assertIn(app.APP_VERSION, str(root.update_button.cget("text")))
+        finally:
+            root.destroy()
+
     def test_decorative_step_numbers_and_brand_letter_are_not_rendered(self) -> None:
         root = app.UnifiedDownloaderApp()
         root.withdraw()

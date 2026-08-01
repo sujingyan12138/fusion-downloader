@@ -15,6 +15,7 @@ from yt_dlp.utils import DownloadError
 
 from . import covers
 from .paths import author_output_root
+from services.cancellation import DownloadCancelled, cancellation_requested, raise_if_cancelled
 
 
 LogFn = Callable[[str], None]
@@ -81,6 +82,7 @@ def download_video(
 ) -> dict:
     raw_logger = log or (lambda _message: None)
     logger = lambda message: _emit_log(raw_logger, message)
+    raise_if_cancelled()
     url = extract_url(url)
     ffmpeg = find_executable("ffmpeg")
     ffprobe = find_executable("ffprobe")
@@ -141,6 +143,8 @@ def download_video(
     except TikTokDownloadError:
         raise
     except DownloadError as exc:
+        if cancellation_requested():
+            raise DownloadCancelled("用户已终止下载。") from exc
         raise TikTokDownloadError(_friendly_download_error(exc)) from exc
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise TikTokDownloadError(f"TikTok 视频处理失败：{exc}") from exc
@@ -530,6 +534,7 @@ class _ProgressHook:
         self._last_percent = -10
 
     def __call__(self, status: dict) -> None:
+        raise_if_cancelled()
         if str(status.get("status") or "") != "downloading":
             return
         if not self._started:

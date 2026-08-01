@@ -22,6 +22,7 @@ from PIL import Image, UnidentifiedImageError
 
 from . import covers, douyin
 from .paths import author_output_root
+from services.cancellation import DownloadCancelled, raise_if_cancelled
 
 
 LogFn = Callable[[str], None]
@@ -268,14 +269,6 @@ def download_note(
         report["elapsed_seconds"] = 0
         logger(f"小红书仅封面任务完成：{cover.get('resolution', '未知分辨率')}")
         return report
-    existing_media_names = existing_media_filenames(note_dir)
-    if has_existing_note_download(note_dir, note_id, existing_media_names):
-        logger(f"已存在下载结果，跳过下载：{note_id}")
-        report["skipped"].append({"note_id": note_id, "reason": "exists"})
-        report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        report["elapsed_seconds"] = 0
-        return report
-
     engine = make_download_engine(use_idm)
     report["download_engine"] = engine.name
     logger(f"下载引擎：{engine.name}")
@@ -304,9 +297,10 @@ def download_note(
     report["elapsed_seconds"] = round(time.perf_counter() - started_at, 3)
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    ok_count = sum(1 for item in report["images"] if item.get("status") == "ok")
-    live_ok_count = sum(1 for item in report["live_photos"] if item.get("status") == "ok")
-    video_ok_count = sum(1 for item in report["videos"] if item.get("status") == "ok")
+    successful_statuses = {"ok", "skipped"}
+    ok_count = sum(1 for item in report["images"] if item.get("status") in successful_statuses)
+    live_ok_count = sum(1 for item in report["live_photos"] if item.get("status") in successful_statuses)
+    video_ok_count = sum(1 for item in report["videos"] if item.get("status") in successful_statuses)
     total_count = len(images) + live_photo_count + len(note_videos)
     total_ok_count = ok_count + live_ok_count + video_ok_count
     logger(
@@ -617,19 +611,10 @@ def download_xhs_url_collection_items(
     cover_only: bool = False,
     organize_by_author: bool = False,
 ) -> None:
-    existing_media_names = existing_media_filenames(collection_dir)
     pending: list[tuple[int, str, str]] = []
     for index, url in enumerate(urls, start=1):
+        raise_if_cancelled()
         note_id = extract_note_id_from_url(url)
-        if (
-            not download_cover
-            and not organize_by_author
-            and note_id
-            and has_existing_note_download(collection_dir, note_id, existing_media_names)
-        ):
-            logger(f"已存在，跳过{label} {index}/{len(urls)}：{note_id}")
-            report["skipped"].append({"index": index, "note_id": note_id, "url": url, "reason": "exists"})
-            continue
         pending.append((index, note_id, url))
 
     if limit:
@@ -641,6 +626,7 @@ def download_xhs_url_collection_items(
         logger(f"{label}并发：作品 {collection_workers}，单作品{item_label} {per_item_workers}")
 
     def run_one(item: tuple[int, str, str]) -> dict:
+        raise_if_cancelled()
         index, note_id, url = item
         logger(f"\n----- {label} {index}/{len(urls)} -----")
         logger(url)
@@ -667,6 +653,8 @@ def download_xhs_url_collection_items(
                     },
                 }
             return {"kind": "item", "item": {"index": index, "note_id": note_id, "url": url, "status": "ok", "report": item_report}}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.
             message = str(exc)
             logger(f"{label}失败：{message}")
@@ -675,12 +663,16 @@ def download_xhs_url_collection_items(
     if not pending:
         return
     if collection_workers == 1:
-        results = [run_one(item) for item in pending]
+        results = []
+        for item in pending:
+            raise_if_cancelled()
+            results.append(run_one(item))
     else:
         results = []
         with ThreadPoolExecutor(max_workers=collection_workers) as executor:
             futures = [executor.submit(run_one, item) for item in pending]
             for future in as_completed(futures):
+                raise_if_cancelled()
                 results.append(future.result())
 
     for result in sorted(results, key=lambda item: item.get("item", {}).get("index", 0)):
@@ -1261,6 +1253,31 @@ def save_or_enqueue_image(
     return best.bytes_count
 
 
+def existing_image_matches(path: Path, content: bytes) -> bool:
+    if not path.is_file() or not content:
+        return False
+    try:
+        if path.stat().st_size != len(content):
+            return False
+        return path.read_bytes() == content
+    except OSError:
+        return False
+
+
+def existing_media_matches(path: Path, result: MediaProbeResult) -> bool:
+    expected_size = result.content_length or result.candidate.declared_size
+    if not expected_size or not path.is_file():
+        return False
+    try:
+        if path.stat().st_size != expected_size:
+            return False
+    except OSError:
+        return False
+    actual_dimensions = probe_video_dimensions(path)
+    expected_dimensions = candidate_dimensions(result.candidate)
+    return bool(actual_dimensions) and (not expected_dimensions or actual_dimensions == expected_dimensions)
+
+
 def save_or_enqueue_media(
     engine: DownloadEngine,
     session: requests.Session,
@@ -1320,12 +1337,14 @@ def run_task_group(
         logger(f"{label}任务并发：{actual_workers}")
 
     completed_tasks = 0
-    with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-        futures = [
-            executor.submit(download_media_task, kind, index, payload, note_dir, final_url, engine, file_prefix)
-            for kind, index, payload in tasks
-        ]
+    executor = ThreadPoolExecutor(max_workers=actual_workers)
+    futures = [
+        executor.submit(download_media_task, kind, index, payload, note_dir, final_url, engine, file_prefix)
+        for kind, index, payload in tasks
+    ]
+    try:
         for future in as_completed(futures):
+            raise_if_cancelled()
             completed_tasks += 1
             result = future.result()
             kind = result.get("kind")
@@ -1333,20 +1352,34 @@ def run_task_group(
             append_task_result(kind, item, report, logger)
             if len(tasks) > 1:
                 logger(f"{label}进度：{completed_tasks}/{len(tasks)}")
+    except DownloadCancelled:
+        for future in futures:
+            future.cancel()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def append_task_result(kind: str, item: dict, report: dict, logger: LogFn) -> None:
-    if item.get("status") == "ok":
+    if item.get("status") in {"ok", "skipped"}:
+        if item.get("status") == "skipped":
+            report["skipped"].append(item)
         if kind == "image":
             report["images"].append(item)
-            action = "已投递 IDM" if item.get("engine") == "idm" else "成功"
+            if item.get("status") == "skipped":
+                action = "已复用"
+            else:
+                action = "已投递 IDM" if item.get("engine") == "idm" else "成功"
             logger(
                 f"[{item['index']:03d}] 图片{action}：{item['width']}x{item['height']} "
                 f"{item['format']}，{item['elapsed_seconds']:.1f}s"
             )
         elif kind == "live_photo":
             report["live_photos"].append(item)
-            action = "已投递 IDM" if item.get("engine") == "idm" else "成功"
+            if item.get("status") == "skipped":
+                action = "已复用"
+            else:
+                action = "已投递 IDM" if item.get("engine") == "idm" else "成功"
             logger(
                 f"[{item['index']:03d}] Live Photo {action}："
                 f"{format_media_info(item['bytes'], item.get('dimensions', ''), item.get('declared_dimensions', ''))}，"
@@ -1354,7 +1387,10 @@ def append_task_result(kind: str, item: dict, report: dict, logger: LogFn) -> No
             )
         else:
             report["videos"].append(item)
-            action = "已投递 IDM" if item.get("engine") == "idm" else "成功"
+            if item.get("status") == "skipped":
+                action = "已复用"
+            else:
+                action = "已投递 IDM" if item.get("engine") == "idm" else "成功"
             logger(
                 f"[video {item['index']:03d}] {action}："
                 f"{format_media_info(item['bytes'], item.get('dimensions', ''), item.get('declared_dimensions', ''))}，"
@@ -1386,16 +1422,22 @@ def download_media_task(
     session = make_session()
     start = time.perf_counter()
     try:
+        raise_if_cancelled()
         if kind == "image":
             image: ImageItem = payload
             best = choose_best_image(session, image, final_url)
             prefix = f"{file_prefix}_" if file_prefix else ""
             filename = f"{prefix}{image.index:03d}_{best.width}x{best.height}.{best.extension}"
-            target = unique_path(note_dir / filename)
-            bytes_count = save_or_enqueue_image(engine, best, target, final_url)
+            target = note_dir / filename
+            reused = existing_image_matches(target, best.content)
+            if reused:
+                bytes_count = target.stat().st_size
+            else:
+                target = unique_path(target)
+                bytes_count = save_or_enqueue_image(engine, best, target, final_url)
             item = {
                 "index": image.index,
-                "status": "ok",
+                "status": "skipped" if reused else "ok",
                 "file": str(target),
                 "width": best.width,
                 "height": best.height,
@@ -1403,7 +1445,8 @@ def download_media_task(
                 "format": best.image_format,
                 "source": best.candidate.source,
                 "url": best.candidate.url,
-                "engine": engine.mode,
+                "engine": "existing" if reused else engine.mode,
+                "reused": reused,
                 "declared_width": image.declared_width,
                 "declared_height": image.declared_height,
                 "elapsed_seconds": round(time.perf_counter() - start, 3),
@@ -1423,13 +1466,27 @@ def download_media_task(
             image = payload
             result = choose_best_media(session, image.stream, final_url, f"live_photo_{image.index:03d}")
             prefix = f"{file_prefix}_" if file_prefix else ""
-            target = unique_path(note_dir / f"{prefix}{image.index:03d}_live.mp4")
+            target = note_dir / f"{prefix}{image.index:03d}_live.mp4"
             declared_dimensions = candidate_dimensions(result.candidate)
-            used_idm = media_will_use_idm(engine, result)
-            bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url, declared_dimensions)
+            reused = existing_media_matches(target, result)
+            if reused:
+                used_idm = False
+                bytes_count = target.stat().st_size
+                dimensions = probe_video_dimensions(target) or declared_dimensions
+            else:
+                target = unique_path(target)
+                used_idm = media_will_use_idm(engine, result)
+                bytes_count, dimensions = save_or_enqueue_media(
+                    engine,
+                    session,
+                    result,
+                    target,
+                    final_url,
+                    declared_dimensions,
+                )
             item = {
                 "index": image.index,
-                "status": "ok",
+                "status": "skipped" if reused else "ok",
                 "file": str(target),
                 "bytes": bytes_count,
                 "dimensions": dimensions,
@@ -1437,20 +1494,35 @@ def download_media_task(
                 "source": result.candidate.source,
                 "codec": result.candidate.codec,
                 "url": result.candidate.url,
-                "engine": "idm" if used_idm else engine.mode,
+                "engine": "existing" if reused else ("idm" if used_idm else engine.mode),
+                "reused": reused,
                 "elapsed_seconds": round(time.perf_counter() - start, 3),
             }
             return {"kind": kind, "item": item}
 
         result = choose_best_media(session, payload, final_url, f"video_{index:03d}")
         prefix = f"{file_prefix}_" if file_prefix else ""
-        target = unique_path(note_dir / f"{prefix}video_{index:03d}.mp4")
+        target = note_dir / f"{prefix}video_{index:03d}.mp4"
         declared_dimensions = candidate_dimensions(result.candidate)
-        used_idm = media_will_use_idm(engine, result)
-        bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url, declared_dimensions)
+        reused = existing_media_matches(target, result)
+        if reused:
+            used_idm = False
+            bytes_count = target.stat().st_size
+            dimensions = probe_video_dimensions(target) or declared_dimensions
+        else:
+            target = unique_path(target)
+            used_idm = media_will_use_idm(engine, result)
+            bytes_count, dimensions = save_or_enqueue_media(
+                engine,
+                session,
+                result,
+                target,
+                final_url,
+                declared_dimensions,
+            )
         item = {
             "index": index,
-            "status": "ok",
+            "status": "skipped" if reused else "ok",
             "file": str(target),
             "bytes": bytes_count,
             "dimensions": dimensions,
@@ -1458,10 +1530,13 @@ def download_media_task(
             "source": result.candidate.source,
             "codec": result.candidate.codec,
             "url": result.candidate.url,
-            "engine": "idm" if used_idm else engine.mode,
+            "engine": "existing" if reused else ("idm" if used_idm else engine.mode),
+            "reused": reused,
             "elapsed_seconds": round(time.perf_counter() - start, 3),
         }
         return {"kind": kind, "item": item}
+    except DownloadCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001 - convert worker errors to report entries.
         item = {
             "index": index,
@@ -1581,6 +1656,9 @@ def has_existing_note_download(output_root: Path, note_id: str, media_names: lis
         f"*{note_id}*_[0-9][0-9][0-9].jpeg",
         f"*{note_id}*_[0-9][0-9][0-9].png",
         f"*{note_id}*_[0-9][0-9][0-9].webp",
+        f"*{note_id}*_[0-9][0-9][0-9].heic",
+        f"*{note_id}*_[0-9][0-9][0-9].heif",
+        f"*{note_id}*_[0-9][0-9][0-9].avif",
         f"*{note_id}*live.mp4",
         f"*{note_id}*video_*.mp4",
     ]
@@ -1588,7 +1666,7 @@ def has_existing_note_download(output_root: Path, note_id: str, media_names: lis
 
 
 def existing_media_filenames(output_root: Path) -> list[str]:
-    suffixes = {".jpg", ".jpeg", ".png", ".webp", ".mp4"}
+    suffixes = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".avif", ".mp4"}
     try:
         return [path.name for path in output_root.iterdir() if path.is_file() and path.suffix.lower() in suffixes]
     except OSError:
@@ -2018,8 +2096,17 @@ def choose_best_image(session: requests.Session, image: ImageItem, referer: str)
     declared_area = image.declared_area
 
     for candidate in candidates:
+        raise_if_cancelled()
         try:
-            result = probe_image(session, candidate, referer)
+            result = probe_image(
+                session,
+                candidate,
+                referer,
+                declared_width=image.declared_width,
+                declared_height=image.declared_height,
+            )
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - continue candidate probing.
             failures.append(f"{candidate.source}: {exc}")
             continue
@@ -2028,18 +2115,15 @@ def choose_best_image(session: requests.Session, image: ImageItem, referer: str)
             best = result
 
         if (
-            not candidate.preview
-            and not candidate.transformed
+            candidate.source.endswith(":raw")
+            and result.image_format in {"heic", "heif", "avif"}
             and declared_area
-            and result.area >= int(declared_area * 0.98)
+            and result.area == declared_area
         ):
+            # A valid full-size HEIF-family raw object preserves the source
+            # container (including HDR auxiliary images) and dominates the
+            # transformed PNG/WebP fallbacks that follow it.
             return result
-        if not candidate.preview and not candidate.transformed and candidate.source.startswith("ci."):
-            # A valid ci.xiaohongshu.com raw object is normally the highest-quality
-            # original encoding. If the page has no declared size, avoid slow
-            # probing of lower-priority CDN variants.
-            if not declared_area:
-                return result
 
     if best is None:
         detail = "; ".join(failures[:4])
@@ -2047,7 +2131,14 @@ def choose_best_image(session: requests.Session, image: ImageItem, referer: str)
     return best
 
 
-def probe_image(session: requests.Session, candidate: Candidate, referer: str) -> ProbeResult:
+def probe_image(
+    session: requests.Session,
+    candidate: Candidate,
+    referer: str,
+    declared_width: int = 0,
+    declared_height: int = 0,
+) -> ProbeResult:
+    raise_if_cancelled()
     headers = dict(BASE_HEADERS)
     headers["Referer"] = referer or "https://www.xiaohongshu.com/"
     headers["Accept"] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
@@ -2063,17 +2154,25 @@ def probe_image(session: requests.Session, candidate: Candidate, referer: str) -
         raise XhsDownloadError(f"HTTP {response.status_code}")
 
     content = response.content
+    raise_if_cancelled()
     if len(content) < 32:
         raise XhsDownloadError("响应内容过短")
 
-    try:
-        with Image.open(bytes_to_file(content)) as image:
-            width, height = image.size
-            image_format = (image.format or "unknown").lower()
-    except UnidentifiedImageError as exc:
-        raise XhsDownloadError("响应不是可识别图片") from exc
+    heif_extension = heif_extension_from_bytes(content)
+    if heif_extension:
+        width, height = heif_dimensions(content, declared_width, declared_height)
+        if not width or not height:
+            raise XhsDownloadError("HEIF 原文件缺少可验证的主图尺寸")
+        image_format = heif_extension
+    else:
+        try:
+            with Image.open(bytes_to_file(content)) as image:
+                width, height = image.size
+                image_format = (image.format or "unknown").lower()
+        except UnidentifiedImageError as exc:
+            raise XhsDownloadError("响应不是可识别图片") from exc
 
-    extension = extension_from_bytes(content, image_format)
+    extension = heif_extension or extension_from_bytes(content, image_format)
     return ProbeResult(
         candidate=candidate,
         content=content,
@@ -2098,6 +2197,55 @@ def probe_sort_key(result: ProbeResult) -> tuple[int, int, int, int]:
     return (result.area, non_preview, original, result.bytes_count)
 
 
+def heif_extension_from_bytes(content: bytes) -> str:
+    if len(content) < 16 or content[4:8] != b"ftyp":
+        return ""
+    box_size = int.from_bytes(content[:4], "big")
+    if box_size < 16:
+        return ""
+    brand_end = min(len(content), box_size, 128)
+    brand_bytes = content[8:brand_end]
+    brands = {brand_bytes[index : index + 4] for index in range(0, len(brand_bytes) - 3, 4)}
+    if brands & {b"avif", b"avis"}:
+        return "avif"
+    if brands & {b"heic", b"heix", b"hevc", b"hevx"}:
+        return "heic"
+    if brands & {b"mif1", b"msf1"}:
+        return "heif"
+    return ""
+
+
+def heif_dimensions(content: bytes, declared_width: int = 0, declared_height: int = 0) -> tuple[int, int]:
+    dimensions: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        offset = content.find(b"ispe", start)
+        if offset < 0:
+            break
+        start = offset + 4
+        if offset < 4 or offset + 16 > len(content):
+            continue
+        box_size = int.from_bytes(content[offset - 4 : offset], "big")
+        if box_size < 20 or offset - 4 + box_size > len(content):
+            continue
+        width = int.from_bytes(content[offset + 8 : offset + 12], "big")
+        height = int.from_bytes(content[offset + 12 : offset + 16], "big")
+        if 0 < width <= 100_000 and 0 < height <= 100_000:
+            dimensions.append((width, height))
+
+    declared_area = declared_width * declared_height
+    if declared_area:
+        if (declared_width, declared_height) in dimensions:
+            return declared_width, declared_height
+        if (declared_height, declared_width) in dimensions:
+            return declared_width, declared_height
+        if any(width * height == declared_area for width, height in dimensions):
+            return declared_width, declared_height
+    if dimensions:
+        return max(dimensions, key=lambda value: value[0] * value[1])
+    return 0, 0
+
+
 def choose_best_media(
     session: requests.Session,
     stream: dict,
@@ -2111,8 +2259,11 @@ def choose_best_media(
     best: MediaProbeResult | None = None
     failures: list[str] = []
     for candidate in candidates:
+        raise_if_cancelled()
         try:
             result = probe_media(session, candidate, referer)
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - continue candidate probing.
             failures.append(f"{candidate.source}: {exc}")
             continue
@@ -2299,6 +2450,7 @@ def is_backup_url(url: str) -> bool:
 
 
 def probe_media(session: requests.Session, candidate: MediaCandidate, referer: str) -> MediaProbeResult:
+    raise_if_cancelled()
     headers = dict(BASE_HEADERS)
     headers["Referer"] = referer or "https://www.xiaohongshu.com/"
     headers["Accept"] = "video/mp4,video/*,*/*;q=0.8"
@@ -2362,10 +2514,14 @@ def download_media(
             bytes_count = 0
             with target.open("wb") as file:
                 for chunk in response.iter_content(chunk_size=1024 * 512):
+                    raise_if_cancelled()
                     if not chunk:
                         continue
                     file.write(chunk)
                     bytes_count += len(chunk)
+    except DownloadCancelled:
+        target.unlink(missing_ok=True)
+        raise
     except requests.RequestException as exc:
         raise XhsDownloadError(f"视频下载失败：{exc}") from exc
 
@@ -2376,7 +2532,7 @@ def download_media(
 
 
 def probe_video_dimensions(path: Path) -> str:
-    ffprobe = shutil.which("ffprobe")
+    ffprobe = douyin.find_executable("ffprobe")
     if not ffprobe:
         return ""
 
@@ -2482,6 +2638,9 @@ def derived_identifiers(image: ImageItem) -> list[str]:
 
 
 def extension_from_bytes(content: bytes, image_format: str) -> str:
+    heif_extension = heif_extension_from_bytes(content)
+    if heif_extension:
+        return heif_extension
     if content.startswith(b"\xff\xd8\xff"):
         return "jpg"
     if content.startswith(b"\x89PNG\r\n\x1a\n"):

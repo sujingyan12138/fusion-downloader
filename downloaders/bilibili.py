@@ -21,6 +21,7 @@ from yt_dlp.utils import DownloadError
 
 from . import covers, douyin
 from .paths import author_output_root
+from services.cancellation import DownloadCancelled, raise_if_cancelled
 
 
 LogFn = Callable[[str], None]
@@ -86,6 +87,7 @@ def download_video(
     organize_by_author: bool = False,
 ) -> dict:
     logger = log or (lambda _message: None)
+    raise_if_cancelled()
     url = extract_url(url)
     ffmpeg = find_executable("ffmpeg")
     ffprobe = find_executable("ffprobe")
@@ -403,6 +405,7 @@ def download_parallel_stream(
     try:
         with target.open("r+b") as output:
             for future in as_completed(futures):
+                raise_if_cancelled()
                 start, data = future.result()
                 output.seek(start)
                 output.write(data)
@@ -413,6 +416,11 @@ def download_parallel_stream(
                     elapsed = max(time.monotonic() - started, 0.001)
                     speed = completed / 1024 / 1024 / elapsed
                     logger(f"{label}流下载进度：{percent}%（{speed:.2f} MiB/s）")
+    except DownloadCancelled:
+        for future in futures:
+            future.cancel()
+        target.unlink(missing_ok=True)
+        raise
     except Exception as exc:
         for future in futures:
             future.cancel()
@@ -447,6 +455,7 @@ def _download_range_chunk(
     last_error: Exception | None = None
     attempts = max(_RANGE_RETRIES + 1, len(urls))
     for attempt in range(attempts):
+        raise_if_cancelled()
         url = urls[attempt % len(urls)]
         request_headers = dict(headers)
         request_headers["Range"] = f"bytes={start}-{end}"
@@ -467,9 +476,12 @@ def _download_range_chunk(
                     raise requests.ConnectionError(
                         f"媒体总大小不一致：预期 {total}，实际 {range_total}"
                     )
-                data = b"".join(
-                    chunk for chunk in response.iter_content(256 * 1024) if chunk
-                )
+                chunks: list[bytes] = []
+                for chunk in response.iter_content(256 * 1024):
+                    raise_if_cancelled()
+                    if chunk:
+                        chunks.append(chunk)
+                data = b"".join(chunks)
                 if len(data) != expected:
                     raise requests.ConnectionError(
                         f"分段长度不完整：预期 {expected}，实际 {len(data)}"
@@ -526,6 +538,7 @@ def download_stream_sequential(
 
     with requests.Session() as session:
         while total <= 0 or position < total:
+            raise_if_cancelled()
             requested_end = position + _RANGE_CHUNK_SIZE - 1
             if total > 0:
                 requested_end = min(requested_end, total - 1)
@@ -556,6 +569,7 @@ def download_stream_sequential(
                         written = 0
                         with target.open(mode) as output:
                             for data in response.iter_content(128 * 1024):
+                                raise_if_cancelled()
                                 if data:
                                     output.write(data)
                                     written += len(data)
@@ -605,6 +619,7 @@ def choose_working_urls(
     successes: list[tuple[float, str, int]] = []
 
     def probe(candidate: str) -> tuple[float, str, int] | None:
+        raise_if_cancelled()
         request_headers = dict(headers)
         request_headers["Range"] = "bytes=0-65535"
         started = time.monotonic()
@@ -623,9 +638,11 @@ def choose_working_urls(
                 if range_start != 0 or range_end < range_start or range_total <= 0:
                     return None
                 expected = range_end - range_start + 1
-                received = sum(
-                    len(data) for data in response.iter_content(64 * 1024) if data
-                )
+                received = 0
+                for data in response.iter_content(64 * 1024):
+                    raise_if_cancelled()
+                    if data:
+                        received += len(data)
                 if received != expected:
                     return None
                 return time.monotonic() - started, candidate, range_total

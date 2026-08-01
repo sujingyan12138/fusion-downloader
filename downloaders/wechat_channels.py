@@ -15,6 +15,7 @@ import requests
 from downloaders import youtube
 from downloaders.article_common import safe_filename, unique_path
 from downloaders.paths import author_output_root
+from services.cancellation import DownloadCancelled, raise_if_cancelled
 
 
 LogFn = Callable[[str], None]
@@ -247,6 +248,7 @@ def probe_candidate(
     *,
     session: requests.Session | None = None,
 ) -> ChannelsProbe:
+    raise_if_cancelled()
     client = session or requests
     try:
         response = client.head(
@@ -297,6 +299,7 @@ def download_video(
     log: LogFn | None = None,
 ) -> dict:
     logger = log or (lambda _message: None)
+    raise_if_cancelled()
     canonical = canonicalize_url(url)
     ffprobe = youtube.find_executable("ffprobe")
     if not ffprobe:
@@ -424,6 +427,7 @@ def download_stream_sequential(
             total = expected_size or response_size
             with target.open("wb") as output:
                 for chunk in response.iter_content(1024 * 1024):
+                    raise_if_cancelled()
                     if not chunk:
                         continue
                     output.write(chunk)
@@ -437,7 +441,7 @@ def download_stream_sequential(
                                 f"微信视频号下载进度：{percent}%"
                                 f"（{downloaded / 1024 / 1024 / elapsed:.2f} MiB/s）"
                             )
-    except (OSError, requests.RequestException):
+    except (DownloadCancelled, OSError, requests.RequestException):
         target.unlink(missing_ok=True)
         raise
     if expected_size > 0 and downloaded != expected_size:

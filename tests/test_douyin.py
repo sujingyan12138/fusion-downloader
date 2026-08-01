@@ -95,7 +95,6 @@ class DouyinMarkdownTests(unittest.TestCase):
         )
         self.assertNotIn("在抖音，记录美好生活", text)
         self.assertNotIn("版本过低", text)
-
     def test_truncated_text_is_not_written_as_article(self) -> None:
         aweme = {
             "desc": "只能看到开头……版本过低，升级后可展示全部信息",
@@ -407,6 +406,23 @@ class DouyinCollectionMarkdownTests(unittest.TestCase):
         self.assertEqual(report["skipped_count"], 1)
         self.assertEqual(report["skipped"][0]["reason"], "exists_markdown")
         download_note.assert_not_called()
+
+
+class DouyinCollectionIdTests(unittest.TestCase):
+    def test_string_collection_id_wins_over_rounded_javascript_number(self) -> None:
+        collections = douyin_collection.parse_collection_list(
+            {
+                "collects_list": [
+                    {
+                        "collects_id": 7655694467143407616,
+                        "collects_id_str": "7655694467143407401",
+                        "collects_name": "图片",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(collections, [{"id": "7655694467143407401", "name": "图片", "count": ""}])
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import requests
 
 from . import douyin
+from services.cancellation import DownloadCancelled, raise_if_cancelled
 from .paths import author_output_root
 
 
@@ -114,6 +115,7 @@ def download_collection(
 
     pending: list[tuple[int, dict, str, str]] = []
     for index, aweme in enumerate(awemes, start=1):
+        raise_if_cancelled()
         aweme_id = str(aweme.get("aweme_id") or aweme.get("awemeId") or "")
         if not aweme_id:
             report["failures"].append({"index": index, "error": "作品缺少 aweme_id"})
@@ -167,6 +169,7 @@ def download_collection(
         logger(f"收藏夹作品并发：{collection_workers}，单作品{item_label}并发：{per_item_workers}")
 
     def run_one(item: tuple[int, dict, str, str]) -> dict:
+        raise_if_cancelled()
         index, aweme, aweme_id, url = item
         logger(f"\n----- 收藏夹作品 {index}/{len(awemes)} -----")
         logger(url)
@@ -185,6 +188,8 @@ def download_collection(
                 organize_by_author=organize_by_author,
             )
             return {"kind": "item", "item": {"index": index, "aweme_id": aweme_id, "status": "ok", "report": item_report, "source": "download_note"}}
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - keep collection processing going.
             message = str(exc)
             logger(f"收藏夹作品失败：{message}")
@@ -192,12 +197,16 @@ def download_collection(
 
     if pending:
         if collection_workers == 1:
-            results = [run_one(item) for item in pending]
+            results = []
+            for item in pending:
+                raise_if_cancelled()
+                results.append(run_one(item))
         else:
             results = []
             with ThreadPoolExecutor(max_workers=collection_workers) as executor:
                 futures = [executor.submit(run_one, item) for item in pending]
                 for future in as_completed(futures):
+                    raise_if_cancelled()
                     results.append(future.result())
         for result in sorted(results, key=lambda item: item.get("item", {}).get("index", 0)):
             if result.get("kind") == "item":
@@ -589,7 +598,9 @@ def parse_collection_list(data: dict) -> list[dict]:
     for item in candidates:
         if not isinstance(item, dict):
             continue
-        coll_id = item.get("collects_id") or item.get("collects_id_str") or item.get("id") or item.get("coll_id")
+        # Collection IDs exceed JavaScript's safe integer range. Browser JSON
+        # parsing rounds the numeric field, while collects_id_str stays exact.
+        coll_id = item.get("collects_id_str") or item.get("collects_id") or item.get("id") or item.get("coll_id")
         name = item.get("collects_name") or item.get("name") or item.get("title") or item.get("desc")
         if not coll_id or not name:
             continue

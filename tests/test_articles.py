@@ -197,6 +197,121 @@ class WechatArticleTests(unittest.TestCase):
         self.assertNotIn("avatar", article.body_html)
         self.assertIn("作品正文", article.body_html)
 
+    def test_image_detail_script_prefers_upload_original_and_keeps_watermark_fallback(
+        self,
+    ) -> None:
+        html = r"""
+        <html><head><title>微信公众平台</title></head><body>
+          <div id="js_wx_follow_nickname"><span class="nickNameSpan">灰诚 Ashin</span></div>
+          <div id="js_content"><div id="js_image_content">
+            <h1>坠入凡尘</h1>
+            <p id="js_image_desc">这是一段足够长的微信贴图文字内容，用于验证上传原图、无水印图和水印兜底图的优先级。</p>
+          </div></div>
+          <script>
+          window.imageData = [{
+            cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/base-image/0?wx_fmt=jpeg',
+            width: '2560' * 1,
+            height: '3840' * 1,
+            show_watermark: true,
+            watermark_info: {
+              cdn_url: 'http://mmbiz.qpic.cn/sz_mmbiz_jpg/watermarked-image/0?wx_fmt=jpeg',
+              is_uploader: true,
+            },
+            original_info: {
+              show_original: true,
+              cdn_url: 'http://318.wxapp.tc.qq.com/318/stodownload?m=abc\x26amp;filekey=def',
+              file_size: '46308272' * 1,
+            },
+          }, {
+            cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/base-image/0?wx_fmt=jpeg',
+            width: '2560' * 1,
+            height: '3840' * 1,
+            show_watermark: 'true' === 'true',
+            watermark_info: {
+              cdn_url: 'http://mmbiz.qpic.cn/sz_mmbiz_jpg/watermarked-image/0?wx_fmt=jpeg',
+            },
+            original_info: {
+              show_original: 'true' === 'true',
+              cdn_url: 'http://318.wxapp.tc.qq.com/318/stodownload?m=abc\x26amp;filekey=def',
+              file_size: '46308272' * 1,
+            },
+          }];
+          </script>
+        </body></html>
+        """
+
+        article = wechat.parse_article_html(
+            html,
+            "https://mp.weixin.qq.com/s/short-image-post",
+        )
+        parsed_body = article_common.BeautifulSoup(article.body_html, "html.parser")
+        images = parsed_body.find_all("img")
+
+        self.assertEqual(article.source_type, "wechat_image_post")
+        self.assertEqual(article.title, "坠入凡尘")
+        self.assertEqual(len(images), 1)
+        self.assertEqual(
+            images[0]["data-original"],
+            "http://318.wxapp.tc.qq.com/318/stodownload?m=abc&filekey=def",
+        )
+        self.assertEqual(
+            images[0]["data-src"],
+            "https://mmbiz.qpic.cn/mmbiz_jpg/base-image/0?wx_fmt=jpeg",
+        )
+        candidates = wechat.wechat_image_candidates(
+            images[0],
+            article.canonical_url,
+        )
+        self.assertEqual(
+            candidates[0].url,
+            "http://318.wxapp.tc.qq.com/318/stodownload?m=abc&filekey=def",
+        )
+        self.assertFalse(candidates[0].watermark)
+        watermark_candidates = [
+            candidate
+            for candidate in candidates
+            if "data-watermark-src" in candidate.source
+        ]
+        self.assertTrue(watermark_candidates)
+        self.assertTrue(all(candidate.watermark for candidate in watermark_candidates))
+
+    def test_raw_image_detail_metadata_can_hydrate_public_page_shell(self) -> None:
+        html = r"""
+        <html><head>
+          <meta property="og:title" content="坠入凡尘">
+          <meta name="description" content="第一行\x0a第二行，文字内容足够长，可以验证公开页面脚本直接生成微信贴图正文。">
+        </head><body>
+          <script>
+          window.imageData = [{
+            cdn_url: 'https://mmbiz.qpic.cn/mmbiz_jpg/base-image/0?wx_fmt=jpeg',
+            width: '2560' * 1,
+            height: '3840' * 1,
+            show_watermark: false,
+            watermark_info: {cdn_url: ''},
+            original_info: {
+              show_original: true,
+              cdn_url: 'http://318.wxapp.tc.qq.com/318/stodownload?m=abc\x26amp;filekey=def',
+              file_size: '46308272' * 1,
+            },
+          }];
+          window.field = {nickname: "data-miniprogram-nickname"};
+          window.account = {nick_name: '子穫 Ashin'};
+          </script>
+        </body></html>
+        """
+
+        article = wechat.parse_article_html(
+            html,
+            "https://mp.weixin.qq.com/s/short-image-post",
+        )
+        body = article_common.BeautifulSoup(article.body_html, "html.parser")
+
+        self.assertEqual(article.title, "坠入凡尘")
+        self.assertEqual(article.author, "子穫 Ashin")
+        self.assertEqual(article.source_type, "wechat_image_post")
+        self.assertIn("第一行 第二行", article.body_html)
+        self.assertEqual(len(body.find_all("img")), 1)
+
     def test_qpic_clean_original_removes_watermark_and_preview_parameters(self) -> None:
         soup = article_common.BeautifulSoup(
             "<img src='https://mmbiz.qpic.cn/path/640?"
@@ -271,11 +386,28 @@ class WechatArticleTests(unittest.TestCase):
         """
         run_opencli_json.side_effect = [
             {"url": page_url},
-            {"url": page_url, "html": html},
+            {"matched": True},
+            {
+                "url": page_url,
+                "title": "贴图标题",
+                "author": "作者",
+                "bodyHtml": (
+                    '<div id="js_content"><div id="js_image_content">'
+                    '<p id="js_image_desc">这是足够长的贴图正文内容，'
+                    "用来验证浏览器窗口释放流程。</p></div></div>"
+                ),
+                "galleryHtml": [
+                    '<img src="https://mmbiz.qpic.cn/a/0?wx_fmt=jpg">'
+                ],
+            },
             {},
         ]
 
-        article = wechat.extract_via_opencli(page_url)
+        with patch(
+            "downloaders.wechat.fetch_wechat_page_html",
+            side_effect=wechat.WechatDownloadError("公开页面不可用"),
+        ):
+            article = wechat.extract_via_opencli(page_url)
         self.assertEqual(article.source_type, "wechat_image_post")
         self.assertEqual(
             run_opencli_json.call_args_list[-1].args[0][-1],

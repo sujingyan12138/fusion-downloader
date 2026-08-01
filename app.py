@@ -12,9 +12,12 @@ from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from app_version import APP_VERSION
 from downloaders import bilibili, douyin, xiaohongshu, youtube, zhihu
 from downloaders.douyin_collection import DouyinCollectionError, list_collections, read_douyin_login_context
+from services.cancellation import DownloadCancelled, request_cancellation, reset_cancellation
 from services.task_runner import TaskOptions, extract_task_inputs, run_task
+from services import updater
 
 
 if getattr(sys, "frozen", False):
@@ -24,6 +27,7 @@ else:
 
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 ICON_PATH = RESOURCE_DIR / "favicon.ico"
+UPDATE_HELPER_PATH = RESOURCE_DIR / "fusion_update_helper.ps1"
 OUTPUT_DIR_NAME = "下载结果"
 DEFAULT_OUTPUT_PARENT = APP_DIR
 SETTINGS_PATH = APP_DIR / "下载器设置.json"
@@ -671,6 +675,7 @@ class UnifiedDownloaderApp(tk.Tk):
 
         self.log_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.update_worker: threading.Thread | None = None
         self.collections: list[dict] = []
         self.output_parent = load_output_parent()
         self.output_root = output_root_for_parent(self.output_parent)
@@ -709,6 +714,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.copy_failure_button: ttk.Button | None = None
         self.copy_all_button: ttk.Button | None = None
         self.clear_log_button: ttk.Button | None = None
+        self.update_button: ttk.Button | None = None
         self.download_cover_check: CheckmarkToggle | None = None
         self.cover_only_check: CheckmarkToggle | None = None
         self.author_folder_radio: ttk.Radiobutton | None = None
@@ -1204,6 +1210,13 @@ class UnifiedDownloaderApp(tk.Tk):
             sticky="w",
             pady=(2, 0),
         )
+        self.update_button = ttk.Button(
+            nav,
+            text=f"检查更新  v{APP_VERSION}",
+            style="Link.TButton",
+            command=self.check_for_updates,
+        )
+        self.update_button.grid(row=0, column=1, sticky="e")
         self.hero_banner = HeroBanner(page)
         self.hero_banner.grid(
             row=1,
@@ -2642,6 +2655,108 @@ class UnifiedDownloaderApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def check_for_updates(self) -> None:
+        if self.is_running or (self.update_worker and self.update_worker.is_alive()):
+            return
+        if self.update_button is not None:
+            self.update_button.configure(state="disabled", text="正在检查更新…")
+        self._append_log(f"正在检查更新：当前版本 v{APP_VERSION}\n")
+
+        def worker() -> None:
+            try:
+                info = updater.check_for_update(APP_VERSION)
+                self.log_queue.put(("update_checked", info))
+            except Exception as exc:  # noqa: BLE001 - GUI needs a readable update failure.
+                self.log_queue.put(("update_failed", str(exc)))
+
+        self.update_worker = threading.Thread(target=worker, daemon=True)
+        self.update_worker.start()
+
+    def _show_update_result(self, info: updater.UpdateInfo) -> None:
+        if self.update_button is not None:
+            self.update_button.configure(state="normal", text=f"检查更新  v{APP_VERSION}")
+        if not info.update_available:
+            self._append_log(f"更新检查完成：当前已是最新版本 v{APP_VERSION}。\n")
+            messagebox.showinfo(
+                "已是最新版本",
+                f"当前版本：v{APP_VERSION}\nGitHub 最新版本：v{info.latest_version}",
+                parent=self,
+            )
+            return
+
+        notes = info.notes.strip() or "这个版本没有填写更新说明。"
+        if len(notes) > 1200:
+            notes = notes[:1200].rstrip() + "…"
+        asset = info.asset
+        if asset is None or not asset.sha256:
+            reason = "没有找到 Windows EXE" if asset is None else "缺少 SHA-256 校验值"
+            self._append_log(f"发现 v{info.latest_version}，但无法安全自动安装：{reason}。\n")
+            if messagebox.askyesno(
+                "发现新版本",
+                f"当前版本：v{APP_VERSION}\n最新版本：v{info.latest_version}\n\n"
+                f"{notes}\n\n自动安装暂不可用（{reason}）。是否打开 GitHub 下载页面？",
+                parent=self,
+            ):
+                webbrowser.open(info.release_url or updater.RELEASES_PAGE)
+            return
+
+        size_mb = asset.size / 1024 / 1024
+        if not messagebox.askyesno(
+            "发现新版本",
+            f"当前版本：v{APP_VERSION}\n最新版本：v{info.latest_version}\n"
+            f"下载大小：{size_mb:.1f} MB\n\n{notes}\n\n"
+            "是否下载新版？下载完成并校验无误后，软件会再次询问是否安装。",
+            parent=self,
+        ):
+            self._append_log("用户暂不下载新版。\n")
+            return
+        self._download_update(info)
+
+    def _download_update(self, info: updater.UpdateInfo) -> None:
+        if self.update_button is not None:
+            self.update_button.configure(state="disabled", text="正在下载更新…")
+        self._append_log(f"开始下载 v{info.latest_version}；完成后会核对文件大小和 SHA-256。\n")
+
+        def progress(downloaded: int, total: int) -> None:
+            self.log_queue.put(("update_progress", (downloaded, total)))
+
+        def worker() -> None:
+            try:
+                staged = updater.download_update(info, APP_DIR, progress=progress)
+                self.log_queue.put(("update_downloaded", (info, staged)))
+            except Exception as exc:  # noqa: BLE001 - GUI needs a readable update failure.
+                self.log_queue.put(("update_failed", str(exc)))
+
+        self.update_worker = threading.Thread(target=worker, daemon=True)
+        self.update_worker.start()
+
+    def _confirm_update_install(self, info: updater.UpdateInfo, staged: Path) -> None:
+        if self.update_button is not None:
+            self.update_button.configure(state="normal", text=f"检查更新  v{APP_VERSION}")
+        self._append_log(f"新版 v{info.latest_version} 下载并校验通过：{staged}\n")
+        if not messagebox.askyesno(
+            "安装更新",
+            f"v{info.latest_version} 已下载并通过 SHA-256 校验。\n\n"
+            "点击“是”后软件将关闭、替换 EXE 并重新打开。登录态、设置和下载结果不会被删除。\n"
+            "旧版 EXE 会保留在“更新备份”中，启动失败时会自动恢复。",
+            parent=self,
+        ):
+            self._append_log("新版已保存在更新临时文件中，用户暂未安装。\n")
+            return
+        try:
+            updater.launch_update_helper(
+                staged,
+                UPDATE_HELPER_PATH,
+                info.latest_version,
+                current_version=APP_VERSION,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the running version intact.
+            messagebox.showerror("无法安装更新", str(exc), parent=self)
+            self._append_log(f"无法启动更新安装：{exc}\n")
+            return
+        self._append_log("更新程序已启动，正在关闭当前版本。\n")
+        self.after(200, self.destroy)
+
     def refresh_collections(self) -> None:
         if self.is_running:
             return
@@ -2687,6 +2802,7 @@ class UnifiedDownloaderApp(tk.Tk):
             )
             return
         self._set_buttons_state("disabled")
+        reset_cancellation()
         self._reset_stats(total=1 if options.feature in {"收藏夹", "收藏视频", "收藏作品"} else len(options.inputs))
         self.empty_state_label.configure(text="任务运行中，请等待下载完成。")
         if options.platform in {"微信", "微信公众号", "知乎"}:
@@ -2755,9 +2871,20 @@ class UnifiedDownloaderApp(tk.Tk):
             report = run_task(options, log=lambda msg: self.log_queue.put(("log", msg)))
             self.last_output_dir = report.get("output_dir")
             self.log_queue.put(("task_success", report))
+        except DownloadCancelled as exc:
+            self.log_queue.put(("task_cancelled", str(exc)))
         except (DouyinCollectionError, Exception) as exc:  # noqa: BLE001
             self.log_queue.put(("task_failed", str(exc)))
         self.log_queue.put(("all_done", None))
+
+    def cancel_current_task(self) -> None:
+        if not self.is_running:
+            return
+        if request_cancellation():
+            self._append_log(
+                "已请求终止：软件会停止后续解析和下载；正在等待的网络请求返回后退出。\n"
+            )
+        self.start_button.configure(state="disabled", text="正在终止…")
 
     def _drain_log_queue(self) -> None:
         try:
@@ -2779,6 +2906,22 @@ class UnifiedDownloaderApp(tk.Tk):
                     self._on_feature_change()
                 elif event == "login_status":
                     self.login_status_label.configure(text=f"登录状态：{payload}")
+                elif event == "update_checked" and isinstance(payload, updater.UpdateInfo):
+                    self._show_update_result(payload)
+                elif event == "update_progress" and isinstance(payload, tuple) and len(payload) == 2:
+                    downloaded, total = (int(payload[0]), int(payload[1]))
+                    percent = 0 if total <= 0 else min(100, int(downloaded / total * 100))
+                    if self.update_button is not None:
+                        self.update_button.configure(text=f"正在下载更新 {percent}%")
+                elif event == "update_downloaded" and isinstance(payload, tuple) and len(payload) == 2:
+                    info, staged = payload
+                    if isinstance(info, updater.UpdateInfo):
+                        self._confirm_update_install(info, Path(staged))
+                elif event == "update_failed":
+                    if self.update_button is not None:
+                        self.update_button.configure(state="normal", text=f"检查更新  v{APP_VERSION}")
+                    self._append_log(f"更新失败：{payload}\n")
+                    messagebox.showerror("更新失败", str(payload), parent=self)
                 elif event == "task_success":
                     report = payload if isinstance(payload, dict) else {}
                     failures = report.get("failures") if isinstance(report.get("failures"), list) else []
@@ -2802,8 +2945,14 @@ class UnifiedDownloaderApp(tk.Tk):
                     self.failed_tasks = max(1, self.total_tasks)
                     self._append_log(f"任务失败：{payload}\n")
                     self._refresh_stats()
+                elif event == "task_cancelled":
+                    self._append_log(f"{payload}\n")
+                    self.status_label.configure(text="任务已终止")
+                    self.empty_state_label.configure(text="下载已终止，可以修改设置后重新开始。")
                 elif event == "all_done":
                     self._set_buttons_state("normal")
+                    if self.status_label.cget("text") == "任务已终止":
+                        continue
                     cover_suffix = (
                         f"，封面警告 {self.cover_failed_tasks}"
                         if self.cover_failed_tasks
@@ -2906,15 +3055,14 @@ class UnifiedDownloaderApp(tk.Tk):
     def _set_buttons_state(self, state: str) -> None:
         readonly = "readonly" if state == "normal" else "disabled"
         self.start_button.configure(
-            state=state,
+            state="normal",
+            command=self.start_from_mode if state == "normal" else self.cancel_current_task,
             text=(
                 "下载封面"
                 if state == "normal" and self.cover_only_var.get()
                 else "开始下载"
                 if state == "normal"
-                else "正在下载封面…"
-                if self.cover_only_var.get()
-                else "正在下载…"
+                else "终止下载"
             ),
         )
         self.mode_batch_radio.configure(state=state)
@@ -2945,6 +3093,7 @@ class UnifiedDownloaderApp(tk.Tk):
             self.login_youtube_button,
             self.login_zhihu_button,
             self.check_login_button,
+            self.update_button,
         ):
             if button is not None:
                 button.configure(state=state)

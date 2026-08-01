@@ -22,12 +22,14 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 
+from app_version import APP_VERSION
 from downloaders.opencli_browser import OpenCliWindowGuard
 from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
 from . import covers
 from .paths import author_output_root
+from services.cancellation import DownloadCancelled, raise_if_cancelled
 
 
 LogFn = Callable[[str], None]
@@ -49,7 +51,6 @@ BASE_HEADERS = {
 
 ACTIVE_PROXIES: list["HeaderProxyServer"] = []
 DOUYIN_LOGIN_URL = "https://www.douyin.com/"
-APP_VERSION = "2026-07-16-speed-v4"
 NO_WINDOW_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 IDM_LARGE_FILE_THRESHOLD = 80 * 1024 * 1024
 IDM_VIDEO_FILE_THRESHOLD = 20 * 1024 * 1024
@@ -3020,12 +3021,14 @@ def run_task_group(
     if len(tasks) > 1:
         logger(f"{label}任务并发：{actual_workers}")
     completed_tasks = 0
-    with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-        futures = [
-            executor.submit(download_media_task, kind, index, payload, note_dir, final_url, engine, file_prefix)
-            for kind, index, payload in tasks
-        ]
+    executor = ThreadPoolExecutor(max_workers=actual_workers)
+    futures = [
+        executor.submit(download_media_task, kind, index, payload, note_dir, final_url, engine, file_prefix)
+        for kind, index, payload in tasks
+    ]
+    try:
         for future in as_completed(futures):
+            raise_if_cancelled()
             completed_tasks += 1
             result = future.result()
             kind = result.get("kind")
@@ -3033,6 +3036,12 @@ def run_task_group(
             append_task_result(kind, item, report, logger)
             if len(tasks) > 1:
                 logger(f"{label}进度：{completed_tasks}/{len(tasks)}")
+    except DownloadCancelled:
+        for future in futures:
+            future.cancel()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def append_task_result(kind: str, item: dict, report: dict, logger: LogFn) -> None:
@@ -3060,6 +3069,7 @@ def download_media_task(kind: str, index: int, payload, note_dir: Path, final_ur
     session = make_session()
     start = time.perf_counter()
     try:
+        raise_if_cancelled()
         if kind == "image":
             image: ImageItem = payload
             best = choose_best_image(session, image, final_url)
@@ -3112,6 +3122,8 @@ def download_media_task(kind: str, index: int, payload, note_dir: Path, final_ur
             "elapsed_seconds": round(time.perf_counter() - start, 3),
         }
         return {"kind": kind, "item": item}
+    except DownloadCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         return {
             "kind": kind,
@@ -3129,8 +3141,11 @@ def choose_best_image(session: requests.Session, image: ImageItem, referer: str)
     best: ImageProbeResult | None = None
     failures: list[str] = []
     for candidate in image.candidates:
+        raise_if_cancelled()
         try:
             result = probe_image(session, candidate, referer)
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{candidate.source}: {exc}")
             continue
@@ -3142,6 +3157,7 @@ def choose_best_image(session: requests.Session, image: ImageItem, referer: str)
 
 
 def probe_image(session: requests.Session, candidate: ImageCandidate, referer: str) -> ImageProbeResult:
+    raise_if_cancelled()
     headers = dict(BASE_HEADERS)
     headers["Referer"] = referer or "https://www.douyin.com/"
     headers["Accept"] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
@@ -3154,6 +3170,7 @@ def probe_image(session: requests.Session, candidate: ImageCandidate, referer: s
     if response.status_code >= 400:
         raise DouyinDownloadError(f"HTTP {response.status_code}")
     content = response.content
+    raise_if_cancelled()
     if len(content) < 32:
         raise DouyinDownloadError("图片响应内容过短。")
     extension = extension_from_bytes(content, response.headers.get("Content-Type", ""))
@@ -3183,8 +3200,11 @@ def choose_best_media(session: requests.Session, stream: dict, referer: str, sou
     best: MediaProbeResult | None = None
     failures: list[str] = []
     for candidate in candidates:
+        raise_if_cancelled()
         try:
             result = probe_media(session, candidate, referer)
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{candidate.source}: {exc}")
             continue
@@ -3196,6 +3216,7 @@ def choose_best_media(session: requests.Session, stream: dict, referer: str, sou
 
 
 def probe_media(session: requests.Session, candidate: MediaCandidate, referer: str) -> MediaProbeResult:
+    raise_if_cancelled()
     headers = dict(BASE_HEADERS)
     headers["Referer"] = referer or "https://www.douyin.com/"
     headers["Accept"] = "video/mp4,video/*,*/*;q=0.8"
@@ -3291,9 +3312,13 @@ def download_binary(session: requests.Session, url: str, target: Path, referer: 
             bytes_count = 0
             with target.open("wb") as file:
                 for chunk in response.iter_content(chunk_size=1024 * 512):
+                    raise_if_cancelled()
                     if chunk:
                         file.write(chunk)
                         bytes_count += len(chunk)
+    except DownloadCancelled:
+        target.unlink(missing_ok=True)
+        raise
     except requests.RequestException as exc:
         raise DouyinDownloadError(f"媒体下载失败：{exc}") from exc
     if bytes_count < 32:
