@@ -22,6 +22,22 @@ def make_heic(width: int, height: int) -> bytes:
 
 
 class XiaohongshuHighestQualityTests(unittest.TestCase):
+    def test_favorite_script_uses_profile_page_when_account_api_is_unavailable(self) -> None:
+        script = xiaohongshu.build_favorite_video_script(limit=1)
+
+        self.assertIn("function currentUserId()", script)
+        self.assertIn("function openMyPage()", script)
+        self.assertIn("currentUserId() || ''", script)
+        self.assertIn("loginRequired:false, authenticated:true", script)
+        self.assertNotIn("String(meRes.data && meRes.data.code) === '-101'", script)
+
+    def test_login_probe_requires_an_account_identifier(self) -> None:
+        script = xiaohongshu.build_login_context_script()
+
+        self.assertIn("accountDetected", script)
+        self.assertIn("accountIdFromPage", script)
+        self.assertIn("loginRequired:!accountDetected", script)
+
     def test_probe_image_recognizes_full_size_heic_container(self) -> None:
         content = make_heic(4032, 3024)
         response = MagicMock()

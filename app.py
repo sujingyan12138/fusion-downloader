@@ -36,6 +36,26 @@ XHS_FEATURES = ("作品媒体", "评论区图片", "作品媒体+评论区图片
 BILIBILI_FEATURES = ("视频媒体",)
 YOUTUBE_FEATURES = ("视频媒体",)
 TIKTOK_FEATURES = ("视频媒体",)
+
+
+def xhs_login_state(context: dict) -> tuple[str, str]:
+    """Return the verified Xiaohongshu account state for the GUI.
+
+    A browser always has several visitor cookies.  They must not be presented as
+    a logged-in account merely because the page itself does not show a login
+    dialog.  The browser-side probe supplies ``accountDetected`` only after it
+    finds an account identifier from the signed-in page or the account API.
+    """
+    cookie_count = len([part for part in str(context.get("cookie") or "").split(";") if part.strip()])
+    if context.get("authenticated") or context.get("accountDetected"):
+        return "account", f"小红书账号登录态可用：浏览器 Cookie {cookie_count} 个"
+    if cookie_count:
+        return (
+            "guest",
+            f"小红书浏览器态可用但未验证账号登录：Cookie {cookie_count} 个。"
+            "公开作品和部分评论可用，收藏作品需要在软件打开的小红书窗口中完成登录。",
+        )
+    return "unavailable", "小红书登录态不可用或已失效，请点击“登录小红书”。"
 ARTICLE_FEATURES = ("文章正文（MD）",)
 WECHAT_FEATURES = ("自动识别（视频/图文）",)
 
@@ -2636,18 +2656,15 @@ class UnifiedDownloaderApp(tk.Tk):
                         self.log_queue.put(("login_status", "抖音未登录或已失效"))
                 else:
                     context = xiaohongshu.read_xhs_login_context()
-                    cookie_count = len([part for part in str(context.get("cookie") or "").split(";") if part.strip()])
-                    me = context.get("me") if isinstance(context.get("me"), dict) else {}
-                    data = me.get("data") if isinstance(me.get("data"), dict) else {}
-                    is_guest = bool(data.get("guest"))
-                    if cookie_count and not is_guest and not context.get("loginRequired"):
-                        self.log_queue.put(("log", f"小红书账号登录态可用：Cookie {cookie_count} 个"))
+                    state, message = xhs_login_state(context)
+                    if state == "account":
+                        self.log_queue.put(("log", message))
                         self.log_queue.put(("login_status", "小红书账号登录态可用"))
-                    elif cookie_count:
-                        self.log_queue.put(("log", f"小红书浏览器态可用但当前是游客态：Cookie {cookie_count} 个。公开作品和部分评论可用，收藏作品需要扫码登录账号。"))
-                        self.log_queue.put(("login_status", "小红书当前为游客态"))
+                    elif state == "guest":
+                        self.log_queue.put(("log", message))
+                        self.log_queue.put(("login_status", "小红书未验证账号登录"))
                     else:
-                        self.log_queue.put(("log", "小红书登录态不可用或已失效，请点击“登录小红书”。"))
+                        self.log_queue.put(("log", message))
                         self.log_queue.put(("login_status", "小红书未登录或已失效"))
             except Exception as exc:  # noqa: BLE001
                 self.log_queue.put(("log", f"检查登录状态失败：{exc}"))

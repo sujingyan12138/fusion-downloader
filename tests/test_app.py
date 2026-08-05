@@ -79,6 +79,28 @@ class OutputLocationTests(unittest.TestCase):
             )
 
 
+class XiaohongshuLoginStateTests(unittest.TestCase):
+    def test_visitor_cookies_do_not_count_as_an_account_login(self) -> None:
+        state, message = app.xhs_login_state(
+            {
+                "cookie": "a1=visitor; webId=visitor",
+                "loginRequired": False,
+                "me": {"code": -1, "success": False},
+            }
+        )
+
+        self.assertEqual(state, "guest")
+        self.assertIn("未验证账号登录", message)
+
+    def test_verified_account_marker_is_required_for_account_login(self) -> None:
+        state, message = app.xhs_login_state(
+            {"cookie": "a1=visitor", "accountDetected": True, "userId": "account-id"}
+        )
+
+        self.assertEqual(state, "account")
+        self.assertIn("账号登录态可用", message)
+
+
 class GuiThemeTests(unittest.TestCase):
     def test_checkmark_toggle_draws_a_tick_and_respects_disabled_state(self) -> None:
         root = tk.Tk()

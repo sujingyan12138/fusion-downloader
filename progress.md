@@ -718,3 +718,11 @@
 - PyInstaller 外层归档确认包含 `fusion_update_helper.ps1`；PYZ TOC 确认包含 `app_version`、`services.updater` 和 `downloaders.douyin_collection`。
 - 正式 EXE 真实窗口 1296×899、响应正常；视觉核对顶部显示 `检查更新 v2.2.0`。实际点击后弹出“已是最新版本”，证明打包态 GitHub 检查链路可用。
 - 两张 GUI 验收截图已删除；本轮启动的正式 EXE 进程剩余 0。保留最终 EXE、源码、测试和用户原有配置/登录态/下载内容。
+
+## 阶段 33：小红书收藏登录态与页面入口修复（2026-08-05）
+
+- 已复现接口 406 / `code=-1`；修复访客 Cookie 被误报为账号登录的问题。
+- 已更新小红书登录检查、全部收藏和专辑读取脚本；已登录时优先使用“我/个人主页”入口，旧接口失败不再导致误判。
+- `unittest discover -s tests -v`：164 项通过；`compileall`、`git diff --check` 通过。
+- 已重新构建 `dist/融合下载器.exe` 与 `dist/Fusion.Downloader.exe`，SHA-256 均为 `E20E8E38890B472689ACF171D77324DCE851917D5FFE46D09C28D27158E31AB9`；归档确认包含 `downloaders.xiaohongshu`，启动窗口响应正常并已关闭，未遗留本轮进程。
+- 用户实际使用的 `dist/严选/Fusion Downloader.exe` 已在关闭后替换为同一哈希的新版本；原版保留为 `Fusion Downloader.before-xhs-favorites-fix-20260805.exe`，新版本启动、响应和正常退出均已复核。
