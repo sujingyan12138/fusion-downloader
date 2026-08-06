@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from PIL import Image
+from PIL import Image, ImageFont
 
 
 class OutputLocationTests(unittest.TestCase):
@@ -154,6 +154,12 @@ class GuiThemeTests(unittest.TestCase):
                 ],
             )
 
+    def test_brand_font_is_available_to_source_runtime(self) -> None:
+        self.assertEqual(app.BRAND_FONT_PATH.name, "Geist-SemiBold.ttf")
+        self.assertTrue(app.BRAND_FONT_PATH.is_file())
+        self.assertGreater(app.BRAND_FONT_PATH.stat().st_size, 10_000)
+        self.assertIsInstance(ImageFont.truetype(app.BRAND_FONT_PATH, size=24), ImageFont.FreeTypeFont)
+
     def test_manual_update_button_shows_current_version(self) -> None:
         root = app.UnifiedDownloaderApp()
         root.withdraw()
@@ -188,28 +194,25 @@ class GuiThemeTests(unittest.TestCase):
             self.assertNotIn("STEP 02", rendered_text)
             self.assertNotIn("05", rendered_text)
             self.assertNotIn("F", rendered_text)
-            self.assertEqual(len(root.hero_banner.find_withtag("banner_orb")), 2)
-            self.assertEqual(len(root.hero_banner.find_withtag("aurora_arc")), 3)
-            self.assertEqual(len(root.hero_banner.find_withtag("aurora_particle")), 3)
+            self.assertEqual(root.title(), "Fusion Downloader")
+            self.assertIsNotNone(root.header_bar)
+            header = root.header_bar
+            self.assertGreaterEqual(header.winfo_reqheight(), 78)
+            self.assertEqual(header.type(header.find_withtag("brand_title")[0]), "image")
+            self.assertFalse(any(text in {"融合下载器", "多平台内容下载工作台"} for text in rendered_text))
         finally:
             root.destroy()
 
-    def test_hero_banner_aurora_motion_updates_particles_when_visible(self) -> None:
+    def test_minimal_header_has_one_centered_brand_title(self) -> None:
         root = app.UnifiedDownloaderApp()
         try:
             root.withdraw()
             root.update_idletasks()
-            banner = root.hero_banner
-            particle = banner.find_withtag("aurora_particle")[0]
-            before = banner.coords(particle)
-
-            with patch.object(banner, "winfo_viewable", return_value=True):
-                banner._animate_aurora()
-
-            self.assertNotEqual(banner.coords(particle), before)
-            self.assertIsNotNone(banner._animation_job)
+            header = root.header_bar
+            self.assertIsNotNone(header)
+            self.assertEqual(len(header.find_withtag("brand_title")), 1)
+            self.assertEqual(len(header.find_withtag("update_control")), 1)
         finally:
-            root.hero_banner._stop_animation()
             root.destroy()
 
     def test_output_controls_are_in_footer_and_author_grouping_is_default(self) -> None:

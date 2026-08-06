@@ -742,3 +742,22 @@
 - 更新 GUI 回归测试，分别校验原有两层背景圆、三层光环、三颗粒子，以及可见状态下粒子坐标会变化。
 - 验证：`unittest discover -s tests -v` 165 项通过；`compileall -q app.py downloaders services tests` 与 `git diff --check` 通过。
 - 用独立源码窗口截取两帧，约 1.2 秒后光环和粒子位置确实变化，未越过横幅文案；验证窗口已正常关闭。
+
+## 阶段 36：首页横幅全幅视觉与 EXE 打包（2026-08-06）
+
+- 用户确认采用全幅图片、移除横幅营销文字；已替换为原创黑洞视觉，并保留约 12.5 FPS 的低幅度镜头漂移。
+- 已更新 `app.py`、`build_exe.ps1` 和 GUI 回归测试；全量 166 项测试、`compileall`、PowerShell 脚本解析与 `git diff --check` 在打包前通过。
+- 正式构建完成：两份 EXE 均为 252,609,187 字节，SHA-256 为 `97C1A4290BFEE98F8B9ABA10818179AC4F366EEFA99B5D9CD706B5F67937169A`。
+- 归档确认包含 `assets\\hero_blackhole_v1.png`、`deno.exe` 与更新助手；正式窗口加载、响应及正常关闭均已验证，未遗留本轮 EXE 进程。
+
+## 阶段 37：极简页头收敛（2026-08-06）
+
+- 根据用户截图，撤销带灰雾的图像背景方案，改用无图片的浅色页头、居中 Fusion Downloader 和细分隔线。
+- 清理 assets/hero_blackhole_v1.png，移除其加载、回归测试和 PyInstaller 数据项；检查更新入口改为与页头同色的低强调文本按钮。
+- 全量 165 项测试、compileall 与 git diff --check 通过；新构建两份 EXE 均为 250,882,299 字节，SHA-256 为 56BDC93ACAE50B0F204F225EAF41CFFF3F1DE6058586629616DC3E64DF849F12，归档确认不包含已撤销图片。
+
+## 阶段 38：页头品牌字体（2026-08-06）
+
+- 从 Vercel 官方 Geist 仓库引入 Geist-SemiBold.ttf 及其 OFL 许可证；本地解析结果为 Geist SemiBold，文件大小 127,872 字节。
+- MinimalHeader 现在将 Fusion Downloader 以两倍分辨率的 Geist 字形渲染后缩小，保留系统字体作为资源异常时的回退。
+- 全量 166 项测试、compileall、PowerShell 打包脚本解析和 git diff --check 通过；新构建两份 EXE 均为 250,947,880 字节，SHA-256 为 01C086A8EC20D93096DEFC6E2C4F21282BCD9C96A0FA1C6FA3A7A5BB9E0B6E25。

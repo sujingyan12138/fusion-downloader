@@ -26,6 +26,17 @@ if (-not (Test-Path -LiteralPath $icon)) {
 $argsList += @("--icon", $icon)
 $argsList += @("--add-data", "$icon;.")
 
+$brandFont = Join-Path $PSScriptRoot "assets\fonts\Geist-SemiBold.ttf"
+if (-not (Test-Path -LiteralPath $brandFont)) {
+    throw "assets\fonts\Geist-SemiBold.ttf was not found. Packaging stopped because the brand title font is required."
+}
+$fontLicense = Join-Path $PSScriptRoot "assets\fonts\Geist-OFL.txt"
+if (-not (Test-Path -LiteralPath $fontLicense)) {
+    throw "assets\fonts\Geist-OFL.txt was not found. Packaging stopped because the bundled font license is required."
+}
+$argsList += @("--add-data", "$brandFont;assets\fonts")
+$argsList += @("--add-data", "$fontLicense;assets\fonts")
+
 $updateHelper = Join-Path $PSScriptRoot "fusion_update_helper.ps1"
 if (-not (Test-Path -LiteralPath $updateHelper)) {
     throw "fusion_update_helper.ps1 was not found. Packaging stopped because safe self-update requires the helper."
@@ -62,7 +73,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $builtExe = Join-Path $PSScriptRoot "dist\$exeName.exe"
-$releaseExe = Join-Path $PSScriptRoot "dist\Fusion.Downloader.exe"
+$releaseExe = Join-Path $PSScriptRoot "dist\Fusion Downloader.exe"
 if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) {
     throw "PyInstaller reported success but the expected executable was not created: $builtExe"
 }
@@ -77,5 +88,5 @@ finally {
     $sha256.Dispose()
 }
 Write-Host "Build complete: dist\$exeName.exe"
-Write-Host "Release asset: dist\Fusion.Downloader.exe"
+Write-Host "Release asset: dist\Fusion Downloader.exe"
 Write-Host "SHA-256: $releaseHash"

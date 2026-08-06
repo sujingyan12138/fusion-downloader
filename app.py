@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import queue
 import sys
@@ -12,6 +11,8 @@ import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from app_version import APP_VERSION
 from downloaders import bilibili, douyin, xiaohongshu, youtube, zhihu
@@ -29,6 +30,7 @@ else:
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 ICON_PATH = RESOURCE_DIR / "favicon.ico"
 UPDATE_HELPER_PATH = RESOURCE_DIR / "fusion_update_helper.ps1"
+BRAND_FONT_PATH = RESOURCE_DIR / "assets" / "fonts" / "Geist-SemiBold.ttf"
 OUTPUT_DIR_NAME = "下载结果"
 DEFAULT_OUTPUT_PARENT = APP_DIR
 SETTINGS_PATH = APP_DIR / "下载器设置.json"
@@ -263,158 +265,87 @@ class RoundedCard(tk.Canvas):
         )
 
 
-class HeroBanner(tk.Canvas):
-    """The landing banner with a deliberately restrained native Canvas animation."""
+class MinimalHeader(tk.Canvas):
+    """A restrained header that keeps the download workspace visually quiet."""
 
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(
             master,
-            height=142,
+            height=78,
             bg=COLORS["background"],
             borderwidth=0,
             highlightthickness=0,
         )
-        self._animation_job: str | None = None
-        self._aurora_arcs: list[tuple[int, float]] = []
-        self._aurora_particles: list[tuple[int, float, float]] = []
-        self._aurora_bounds: tuple[float, float, float] | None = None
-        self._motion_phase = 0.0
+        self._update_button: ttk.Button | None = None
+        self._brand_font = self._load_brand_font()
+        self._brand_photo: ImageTk.PhotoImage | None = None
         self.bind("<Configure>", self._draw)
-        self.bind("<Map>", self._start_animation)
-        self.bind("<Unmap>", self._stop_animation)
-        self.bind("<Destroy>", self._stop_animation)
 
-    def _stop_animation(self, _event: tk.Event | None = None) -> None:
-        if self._animation_job is not None:
-            self.after_cancel(self._animation_job)
-            self._animation_job = None
+    def set_update_button(self, button: ttk.Button) -> None:
+        self._update_button = button
+        self._draw()
 
-    def _start_animation(self, _event: tk.Event | None = None) -> None:
-        if self._animation_job is not None or not self.winfo_viewable():
-            return
-        self._animate_aurora()
+    @staticmethod
+    def _load_brand_font() -> ImageFont.FreeTypeFont | None:
+        try:
+            return ImageFont.truetype(BRAND_FONT_PATH, size=60)
+        except OSError:
+            return None
+
+    def _render_brand_title(self) -> ImageTk.PhotoImage | None:
+        if self._brand_font is None:
+            return None
+
+        title = "Fusion Downloader"
+        bbox = self._brand_font.getbbox(title)
+        padding = 12
+        image = Image.new(
+            "RGBA",
+            (bbox[2] - bbox[0] + padding * 2, bbox[3] - bbox[1] + padding * 2),
+        )
+        ImageDraw.Draw(image).text(
+            (padding - bbox[0], padding - bbox[1]),
+            title,
+            font=self._brand_font,
+            fill="#16382B",
+        )
+        rendered = image.resize(
+            (max(1, image.width // 2), max(1, image.height // 2)),
+            Image.Resampling.LANCZOS,
+        )
+        return ImageTk.PhotoImage(rendered)
 
     def _draw(self, event: tk.Event | None = None) -> None:
-        self._stop_animation()
         self.delete("all")
-        self._aurora_arcs.clear()
-        self._aurora_particles.clear()
         width = max(320, int(event.width) if event is not None else self.winfo_width())
-        height = max(120, int(event.height) if event is not None else self.winfo_height())
-        self.create_polygon(
-            _rounded_points(width, height, 28, inset=1),
-            fill=COLORS["accent_deep"],
-            outline=COLORS["accent_deep"],
-            smooth=True,
-            splinesteps=48,
-        )
-        self.create_oval(
-            width - 360,
-            -170,
-            width + 70,
-            230,
-            fill="#105D45",
-            outline="",
-            tags="banner_orb",
-        )
-        self.create_oval(
-            width - 235,
-            -85,
-            width + 55,
-            205,
-            fill="#087A52",
-            outline="",
-            tags="banner_orb",
-        )
-        # Keep the animation inside the visual-only right third so the copy has
-        # a quiet, consistently legible left-hand field.
-        center_x = max(width * 0.73, width - 148)
-        center_y = height * 0.54
-        radius = min(102.0, height * 0.68)
-        self._aurora_bounds = (center_x, center_y, radius)
-        for radius_scale, color, phase_offset, extent in (
-            (1.00, "#76E6C1", 0.0, 76),
-            (0.80, "#B1F5D8", 122.0, 54),
-            (0.61, "#38CCA0", 246.0, 92),
-        ):
-            item = self.create_arc(
-                center_x - radius * radius_scale,
-                center_y - radius * radius_scale,
-                center_x + radius * radius_scale,
-                center_y + radius * radius_scale,
-                start=phase_offset,
-                extent=extent,
-                style=tk.ARC,
-                outline=color,
-                width=2,
-                stipple="gray50",
-                tags="aurora_arc",
+        height = max(80, int(event.height) if event is not None else self.winfo_height())
+        self.create_rectangle(0, 0, width, height, fill=COLORS["background"], outline="")
+        self.create_line(0, height - 1, width, height - 1, fill="#DDE7E1", width=1)
+        self._brand_photo = self._render_brand_title()
+        if self._brand_photo is not None:
+            self.create_image(
+                width // 2,
+                height // 2,
+                image=self._brand_photo,
+                tags="brand_title",
             )
-            self._aurora_arcs.append((item, phase_offset))
-        for orbit_scale, phase_offset in ((0.96, 26.0), (0.72, 180.0), (0.52, 308.0)):
-            item = self.create_oval(
-                0,
-                0,
-                0,
-                0,
-                fill="#D5FFEE",
-                outline="",
-                stipple="gray50",
-                tags="aurora_particle",
+        else:
+            self.create_text(
+                width // 2,
+                height // 2,
+                text="Fusion Downloader",
+                fill="#14342A",
+                font=("Segoe UI Variable Display Semib", 20),
+                tags="brand_title",
             )
-            self._aurora_particles.append((item, orbit_scale, phase_offset))
-        self.create_text(
-            36,
-            25,
-            text="DOWNLOAD STUDIO",
-            anchor="nw",
-            fill="#6FE1B9",
-            font=("Segoe UI Variable Text Semibold", 9),
-        )
-        title_width = max(260, width - 72)
-        self.create_text(
-            36,
-            50,
-            text="把复杂下载，变成一个动作。",
-            anchor="nw",
-            width=title_width,
-            fill="#FFFFFF",
-            font=("Microsoft YaHei UI", 21, "bold"),
-        )
-        self.create_text(
-            36,
-            93,
-            text="一个入口，保存七个平台的最高质量媒体、文章、封面与收藏内容。",
-            anchor="nw",
-            width=title_width,
-            fill="#C5DED4",
-            font=("Microsoft YaHei UI", 9),
-        )
-
-        self.after_idle(self._start_animation)
-
-    def _animate_aurora(self) -> None:
-        self._animation_job = None
-        if not self.winfo_viewable() or self._aurora_bounds is None:
-            return
-
-        center_x, center_y, radius = self._aurora_bounds
-        self._motion_phase = (self._motion_phase + 1.6) % 360
-        for item, phase_offset in self._aurora_arcs:
-            self.itemconfigure(item, start=(self._motion_phase + phase_offset) % 360)
-
-        for item, orbit_scale, phase_offset in self._aurora_particles:
-            angle = math.radians(self._motion_phase * 1.55 + phase_offset)
-            orbit_x = radius * orbit_scale
-            orbit_y = radius * orbit_scale * 0.64
-            x = center_x + math.cos(angle) * orbit_x
-            y = center_y + math.sin(angle) * orbit_y
-            size = 3 if orbit_scale > 0.8 else 2
-            self.coords(item, x - size, y - size, x + size, y + size)
-
-        # 18 FPS is visually smooth for this small decorative area without
-        # competing with download progress, scrolling, or Tkinter's event loop.
-        self._animation_job = self.after(55, self._animate_aurora)
+        if self._update_button is not None:
+            self.create_window(
+                width - 30,
+                height // 2,
+                anchor="e",
+                window=self._update_button,
+                tags="update_control",
+            )
 class PillButton(tk.Canvas):
     def __init__(
         self,
@@ -771,7 +702,7 @@ class CheckmarkToggle(tk.Canvas):
 class UnifiedDownloaderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("融合下载器")
+        self.title("Fusion Downloader")
         if ICON_PATH.is_file():
             try:
                 self.iconbitmap(default=str(ICON_PATH))
@@ -823,6 +754,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self.copy_all_button: ttk.Button | None = None
         self.clear_log_button: ttk.Button | None = None
         self.update_button: ttk.Button | None = None
+        self.header_bar: MinimalHeader | None = None
         self.download_cover_check: CheckmarkToggle | None = None
         self.cover_only_check: CheckmarkToggle | None = None
         self.author_folder_radio: ttk.Radiobutton | None = None
@@ -834,6 +766,7 @@ class UnifiedDownloaderApp(tk.Tk):
         self._build_ui()
         self._bind_shortcuts()
         self._on_platform_change()
+        self.after(80, lambda: self.scroll_canvas.yview_moveto(0))
         self.after(100, self._drain_log_queue)
 
     def _setup_style(self) -> None:
@@ -1015,6 +948,24 @@ class UnifiedDownloaderApp(tk.Tk):
             focuscolor=COLORS["surface"],
             padding=(3, 4),
             font=("Microsoft YaHei UI", 9),
+        )
+        style.configure(
+            "HeaderLink.TButton",
+            background=COLORS["background"],
+            foreground=COLORS["accent_dark"],
+            borderwidth=0,
+            focuscolor=COLORS["background"],
+            padding=(7, 5),
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map(
+            "HeaderLink.TButton",
+            background=[("active", COLORS["surface_hover"])],
+            foreground=[
+                ("disabled", "#8E9B95"),
+                ("active", COLORS["selection_pressed"]),
+                ("!disabled", COLORS["accent_dark"]),
+            ],
         )
         style.map(
             "Link.TButton",
@@ -1302,38 +1253,15 @@ class UnifiedDownloaderApp(tk.Tk):
         page.columnconfigure(0, weight=1)
         page.columnconfigure(1, weight=1)
 
-        nav = ttk.Frame(page, style="Root.TFrame", padding=(32, 18, 32, 14))
-        nav.grid(row=0, column=0, columnspan=2, sticky="ew")
-        nav.columnconfigure(0, weight=1)
-        brand = ttk.Frame(nav, style="Root.TFrame")
-        brand.grid(row=0, column=0, sticky="w")
-        ttk.Label(brand, text="融合下载器", style="NavTitle.TLabel").grid(
-            row=0,
-            column=0,
-            sticky="w",
-        )
-        ttk.Label(brand, text="多平台内容下载工作台", style="NavSubtitle.TLabel").grid(
-            row=1,
-            column=0,
-            sticky="w",
-            pady=(2, 0),
-        )
+        self.header_bar = MinimalHeader(page)
+        self.header_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.update_button = ttk.Button(
-            nav,
+            self.header_bar,
             text=f"检查更新  v{APP_VERSION}",
-            style="Link.TButton",
+            style="HeaderLink.TButton",
             command=self.check_for_updates,
         )
-        self.update_button.grid(row=0, column=1, sticky="e")
-        self.hero_banner = HeroBanner(page)
-        self.hero_banner.grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            padx=32,
-            pady=(0, 18),
-        )
+        self.header_bar.set_update_button(self.update_button)
 
         self.input_card = RoundedCard(
             page,
@@ -1990,25 +1918,25 @@ class UnifiedDownloaderApp(tk.Tk):
             self.page_frame.columnconfigure(0, weight=5)
             self.page_frame.columnconfigure(1, weight=3)
             self.input_card.grid(
-                row=2,
+                row=1,
                 column=0,
                 sticky="nsew",
                 padx=(32, 10),
                 pady=(0, 18),
             )
             self.status_card.grid(
-                row=2,
+                row=1,
                 column=1,
                 sticky="nsew",
                 padx=(10, 32),
                 pady=(0, 18),
             )
-            self.footer.grid(row=3, column=0, columnspan=2, sticky="ew")
+            self.footer.grid(row=2, column=0, columnspan=2, sticky="ew")
         else:
             self.page_frame.columnconfigure(0, weight=1)
             self.page_frame.columnconfigure(1, weight=0)
             self.input_card.grid(
-                row=2,
+                row=1,
                 column=0,
                 columnspan=2,
                 sticky="ew",
@@ -2016,14 +1944,14 @@ class UnifiedDownloaderApp(tk.Tk):
                 pady=(0, 16),
             )
             self.status_card.grid(
-                row=3,
+                row=2,
                 column=0,
                 columnspan=2,
                 sticky="ew",
                 padx=24,
                 pady=(0, 16),
             )
-            self.footer.grid(row=4, column=0, columnspan=2, sticky="ew")
+            self.footer.grid(row=3, column=0, columnspan=2, sticky="ew")
 
     def _on_page_configure(self, _event: tk.Event | None = None) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
