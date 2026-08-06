@@ -351,3 +351,9 @@
 - 抖音网页会为收藏夹请求附带临时签名并使用 `www-hj.douyin.com`，但本次在修正收藏夹 ID 后，现有普通接口已直接返回完整 2 项，因此无需保存、破解或复用短期签名。
 - 仓库最新正式 GitHub Release 为 `v2.1`，Windows 资产名为 `Fusion.Downloader.exe`，API 返回资产大小、浏览器下载地址和 `sha256:` digest。GitHub 官方文档说明公开仓库的 latest release 可以不认证读取，并返回 Release 与 assets 元数据。
 - 当前实现版本定为 `2.2.0`；检查结果会识别本地版本高于当前公开 v2.1，不会把旧 Release 当作新版。
+
+## v2.3 Release 资产内部版本不同步（2026-08-06）
+
+- GitHub Release 的标签与说明不会自动改写 EXE 内的 `app_version.py`；v2.3 Release 中此前上传的文件仍内置 `2.2.0`，所以运行该文件时界面正确显示“检查更新 v2.2.0”，并继续把线上 v2.3 当作可下载更新。
+- 源码版本已改为 `2.3.0` 后重新构建，新的 `dist/Fusion.Downloader.exe` 与 `dist/严选/Fusion Downloader.exe` SHA-256 均为 `0065CA8FF2F519F5823A5C724B961CF7A2FF9B6F6BC30AEBD45811F9129DAC9F`，大小为 250,882,725 字节。
+- 在新版本上调用更新检查，当前为 `2.3.0`、线上标签为 `2.3`，结果 `update_available=False`；因此更新器的版本比较正确。公开修复仍须以这份新 EXE 替换 v2.3 Release 的同名资产，并确认 GitHub 返回的新大小与 SHA-256。

@@ -726,3 +726,11 @@
 - `unittest discover -s tests -v`：164 项通过；`compileall`、`git diff --check` 通过。
 - 已重新构建 `dist/融合下载器.exe` 与 `dist/Fusion.Downloader.exe`，SHA-256 均为 `E20E8E38890B472689ACF171D77324DCE851917D5FFE46D09C28D27158E31AB9`；归档确认包含 `downloaders.xiaohongshu`，启动窗口响应正常并已关闭，未遗留本轮进程。
 - 用户实际使用的 `dist/严选/Fusion Downloader.exe` 已在关闭后替换为同一哈希的新版本；原版保留为 `Fusion Downloader.before-xhs-favorites-fix-20260805.exe`，新版本启动、响应和正常退出均已复核。
+
+## 阶段 34：v2.3 发布资产内部版本同步（2026-08-06）
+
+- 用户截图确认实际运行的程序顶部显示“检查更新 v2.2.0”；这与 v2.3 Release 的标签冲突，根因是先前将内置 2.2.0 的 EXE 当作 v2.3 资产上传，非更新器解析失败。
+- `app_version.py` 已从 `2.2.0` 改为 `2.3.0`；`unittest discover -s tests -v` 164 项通过，`compileall -q app.py app_version.py downloaders services tests` 与 `git diff --check` 通过。
+- 重新构建后的 `dist/Fusion.Downloader.exe` 为 250,882,725 字节，SHA-256 `0065CA8FF2F519F5823A5C724B961CF7A2FF9B6F6BC30AEBD45811F9129DAC9F`；归档确认包含版本模块、更新器和小红书修复模块。
+- 已把用户本地 `dist/严选/Fusion Downloader.exe` 替换为相同 SHA-256 的新构建；此前错误内置版本的文件保留为 `Fusion Downloader.before-version-sync-20260806.exe`，未改动下载结果、设置或登录态。
+- 新版调用正式 Release 检查返回 `current=2.3.0`、`latest=2.3`、`update_available=False`。尚未对 GitHub Release 执行外部写入；公开修复待以新构建替换 v2.3 的 `Fusion.Downloader.exe` 后，再核对 API 返回的哈希和大小。
