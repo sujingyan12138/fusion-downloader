@@ -734,3 +734,11 @@
 - 重新构建后的 `dist/Fusion.Downloader.exe` 为 250,882,725 字节，SHA-256 `0065CA8FF2F519F5823A5C724B961CF7A2FF9B6F6BC30AEBD45811F9129DAC9F`；归档确认包含版本模块、更新器和小红书修复模块。
 - 已把用户本地 `dist/严选/Fusion Downloader.exe` 替换为相同 SHA-256 的新构建；此前错误内置版本的文件保留为 `Fusion Downloader.before-version-sync-20260806.exe`，未改动下载结果、设置或登录态。
 - 新版调用正式 Release 检查返回 `current=2.3.0`、`latest=2.3`、`update_available=False`。尚未对 GitHub Release 执行外部写入；公开修复待以新构建替换 v2.3 的 `Fusion.Downloader.exe` 后，再核对 API 返回的哈希和大小。
+
+## 阶段 35：首页横幅极光光环动效（2026-08-06）
+
+- 完成 `HeroBanner` 原生 Canvas 动效：三层低对比光环和三颗轨道粒子，限定在横幅右侧；文字区域保持静止。
+- `Map` 时启动，`Unmap`/销毁/重新布局时停止已有计时器，帧间隔为 55 ms（约 18 FPS）。
+- 更新 GUI 回归测试，分别校验原有两层背景圆、三层光环、三颗粒子，以及可见状态下粒子坐标会变化。
+- 验证：`unittest discover -s tests -v` 165 项通过；`compileall -q app.py downloaders services tests` 与 `git diff --check` 通过。
+- 用独立源码窗口截取两帧，约 1.2 秒后光环和粒子位置确实变化，未越过横幅文案；验证窗口已正常关闭。

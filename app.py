@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import sys
@@ -263,6 +264,8 @@ class RoundedCard(tk.Canvas):
 
 
 class HeroBanner(tk.Canvas):
+    """The landing banner with a deliberately restrained native Canvas animation."""
+
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(
             master,
@@ -271,10 +274,31 @@ class HeroBanner(tk.Canvas):
             borderwidth=0,
             highlightthickness=0,
         )
+        self._animation_job: str | None = None
+        self._aurora_arcs: list[tuple[int, float]] = []
+        self._aurora_particles: list[tuple[int, float, float]] = []
+        self._aurora_bounds: tuple[float, float, float] | None = None
+        self._motion_phase = 0.0
         self.bind("<Configure>", self._draw)
+        self.bind("<Map>", self._start_animation)
+        self.bind("<Unmap>", self._stop_animation)
+        self.bind("<Destroy>", self._stop_animation)
+
+    def _stop_animation(self, _event: tk.Event | None = None) -> None:
+        if self._animation_job is not None:
+            self.after_cancel(self._animation_job)
+            self._animation_job = None
+
+    def _start_animation(self, _event: tk.Event | None = None) -> None:
+        if self._animation_job is not None or not self.winfo_viewable():
+            return
+        self._animate_aurora()
 
     def _draw(self, event: tk.Event | None = None) -> None:
+        self._stop_animation()
         self.delete("all")
+        self._aurora_arcs.clear()
+        self._aurora_particles.clear()
         width = max(320, int(event.width) if event is not None else self.winfo_width())
         height = max(120, int(event.height) if event is not None else self.winfo_height())
         self.create_polygon(
@@ -291,6 +315,7 @@ class HeroBanner(tk.Canvas):
             230,
             fill="#105D45",
             outline="",
+            tags="banner_orb",
         )
         self.create_oval(
             width - 235,
@@ -299,7 +324,45 @@ class HeroBanner(tk.Canvas):
             205,
             fill="#087A52",
             outline="",
+            tags="banner_orb",
         )
+        # Keep the animation inside the visual-only right third so the copy has
+        # a quiet, consistently legible left-hand field.
+        center_x = max(width * 0.73, width - 148)
+        center_y = height * 0.54
+        radius = min(102.0, height * 0.68)
+        self._aurora_bounds = (center_x, center_y, radius)
+        for radius_scale, color, phase_offset, extent in (
+            (1.00, "#76E6C1", 0.0, 76),
+            (0.80, "#B1F5D8", 122.0, 54),
+            (0.61, "#38CCA0", 246.0, 92),
+        ):
+            item = self.create_arc(
+                center_x - radius * radius_scale,
+                center_y - radius * radius_scale,
+                center_x + radius * radius_scale,
+                center_y + radius * radius_scale,
+                start=phase_offset,
+                extent=extent,
+                style=tk.ARC,
+                outline=color,
+                width=2,
+                stipple="gray50",
+                tags="aurora_arc",
+            )
+            self._aurora_arcs.append((item, phase_offset))
+        for orbit_scale, phase_offset in ((0.96, 26.0), (0.72, 180.0), (0.52, 308.0)):
+            item = self.create_oval(
+                0,
+                0,
+                0,
+                0,
+                fill="#D5FFEE",
+                outline="",
+                stipple="gray50",
+                tags="aurora_particle",
+            )
+            self._aurora_particles.append((item, orbit_scale, phase_offset))
         self.create_text(
             36,
             25,
@@ -327,6 +390,31 @@ class HeroBanner(tk.Canvas):
             fill="#C5DED4",
             font=("Microsoft YaHei UI", 9),
         )
+
+        self.after_idle(self._start_animation)
+
+    def _animate_aurora(self) -> None:
+        self._animation_job = None
+        if not self.winfo_viewable() or self._aurora_bounds is None:
+            return
+
+        center_x, center_y, radius = self._aurora_bounds
+        self._motion_phase = (self._motion_phase + 1.6) % 360
+        for item, phase_offset in self._aurora_arcs:
+            self.itemconfigure(item, start=(self._motion_phase + phase_offset) % 360)
+
+        for item, orbit_scale, phase_offset in self._aurora_particles:
+            angle = math.radians(self._motion_phase * 1.55 + phase_offset)
+            orbit_x = radius * orbit_scale
+            orbit_y = radius * orbit_scale * 0.64
+            x = center_x + math.cos(angle) * orbit_x
+            y = center_y + math.sin(angle) * orbit_y
+            size = 3 if orbit_scale > 0.8 else 2
+            self.coords(item, x - size, y - size, x + size, y + size)
+
+        # 18 FPS is visually smooth for this small decorative area without
+        # competing with download progress, scrolling, or Tkinter's event loop.
+        self._animation_job = self.after(55, self._animate_aurora)
 class PillButton(tk.Canvas):
     def __init__(
         self,

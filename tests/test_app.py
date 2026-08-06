@@ -188,14 +188,28 @@ class GuiThemeTests(unittest.TestCase):
             self.assertNotIn("STEP 02", rendered_text)
             self.assertNotIn("05", rendered_text)
             self.assertNotIn("F", rendered_text)
-            self.assertEqual(
-                sum(
-                    root.hero_banner.type(item) == "oval"
-                    for item in root.hero_banner.find_all()
-                ),
-                2,
-            )
+            self.assertEqual(len(root.hero_banner.find_withtag("banner_orb")), 2)
+            self.assertEqual(len(root.hero_banner.find_withtag("aurora_arc")), 3)
+            self.assertEqual(len(root.hero_banner.find_withtag("aurora_particle")), 3)
         finally:
+            root.destroy()
+
+    def test_hero_banner_aurora_motion_updates_particles_when_visible(self) -> None:
+        root = app.UnifiedDownloaderApp()
+        try:
+            root.withdraw()
+            root.update_idletasks()
+            banner = root.hero_banner
+            particle = banner.find_withtag("aurora_particle")[0]
+            before = banner.coords(particle)
+
+            with patch.object(banner, "winfo_viewable", return_value=True):
+                banner._animate_aurora()
+
+            self.assertNotEqual(banner.coords(particle), before)
+            self.assertIsNotNone(banner._animation_job)
+        finally:
+            root.hero_banner._stop_animation()
             root.destroy()
 
     def test_output_controls_are_in_footer_and_author_grouping_is_default(self) -> None:
