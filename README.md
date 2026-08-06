@@ -3,7 +3,7 @@
 Windows 本地 GUI，整合抖音、小红书、Bilibili、YouTube、TikTok、微信和知乎下载能力。
 ## 界面展示
 
-![](./assets/image-20260730135249687.png)
+![image-20260806141219739](./assets/image-20260806141219739.png)
 
 
 ## 功能
