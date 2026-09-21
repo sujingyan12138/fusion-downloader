@@ -13,7 +13,10 @@ import sys
 import requests
 
 from app_version import APP_VERSION
-from services.network_policy import bypass_unreachable_loopback_proxy
+from services.network_policy import (
+    bypass_unreachable_loopback_proxy,
+    create_trusted_session,
+)
 
 
 GITHUB_OWNER = "sujingyan12138"
@@ -118,7 +121,7 @@ def select_release_asset(assets: object) -> ReleaseAsset | None:
 
 
 def check_for_update(current_version: str = APP_VERSION) -> UpdateInfo:
-    session = requests.Session()
+    session = create_trusted_session()
     session.headers.update(GITHUB_HEADERS)
     try:
         with bypass_unreachable_loopback_proxy(probe_url=LATEST_RELEASE_API):
@@ -176,7 +179,7 @@ def download_update(
             return final_path
         final_path.unlink(missing_ok=True)
     part_path.unlink(missing_ok=True)
-    session = requests.Session()
+    session = create_trusted_session()
     session.headers.update(GITHUB_HEADERS)
     downloaded = 0
     try:

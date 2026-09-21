@@ -402,3 +402,28 @@
 2. `sleep(2)` + 端口空探测 + `Page.navigate` 阻塞 = 约 5.5s 固定开销，实测无固定 sleep 路径仅 **1.99s** 完成同一件事。
 3. **最大单点瓶颈是 `choose_best_media` 的 19.9s 串行候选探测**——候选可达 20+ 个，每个都要 HEAD→（失败再 GET Range）。
 4. 内置下载顺序单连接只有 7.82 MiB/s；项目已有成熟的 `bilibili.download_parallel_stream`（4 MiB 分块 + 逐块校验 + 串行回退），但抖音未接入。
+
+## 更新检查 TLS 失败：本机 Steam++ MITM 与 certifi 证书库不匹配（2026-09-21）
+
+现象：2.4.0 点"检查更新"弹窗报
+`HTTPSConnectionPool(host='api.github.com', port=443): Max retries exceeded ... SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate'))`。
+
+本机实测证据：
+
+- `reg query ... Internet Settings`：`ProxyEnable = 0x0`（系统代理**关**），但 `ProxyServer = 127.0.0.1:10808` 仍保留（不生效，仅残留配置）。
+- `requests.utils.get_environ_proxies()` 返回 `{}`；`find_unreachable_loopback_proxy()` 返回 `None`。所以 `network_policy` 的"死代理绕过"分支**根本没触发**，直连已经生效，代理不是本次原因。
+- 进程实况：`Steam++.exe`（PID 36148、40756）与 `Steam++.Accelerator.exe`（PID 30992）在运行，后者**独占监听 `0.0.0.0:443`**。
+- 预置 `ssl.create_default_context()` 与 `api.github.com` 握手，拿到的是 `CN=SteamTools Certificate, O=BeyondDimension, OU=Technical Department, C=CN`（且是自签名：subject == issuer）——说明流量被 Steam++ 的加速器本地 MITM 拦截并重新签发。
+- `Cert:\LocalMachine\Root` 中存在多条该根证书（NotBefore 2025/9/12→NotAfter 2026/7/10、以及 2026/4/6→2027/2/1 等），Windows 信任它；`certifi` 的 `cacert.pem` **不含**该根证书（`'SteamTools' in cacert.pem == False`）。
+- 因此：`requests` 默认走 certifi → 校验证书链失败；`verify=False` 才能通（实测 200）。这解释了为什么"浏览器能上 GitHub，软件却报证书错误"。
+- 代码侧复核：全项目（排除 `.venv`/`build`/`dist`）没有任何 `verify=`、`certifi`、`ssl_context` 硬编码；`services/updater.py` 与 `services/network_policy.py` 都用 requests 默认行为，即默认 certifi。**触发条件是运行环境装了 Steam++/Watt Toolkit 之类做 HTTPS 拦截的工具**（此类工具在游戏玩家机上很常见），不是逻辑缺陷。
+
+修复方向（**已于阶段 42 落地**）：
+
+- 用 `ssl.create_default_context(cafile=certifi.where())` 再 `load_default_certs(ssl.Purpose.SERVER_AUTH)` 追加 Windows 根证书库，通过自定义 `HTTPAdapter.init_poolmanager` 把该 context 交给 urllib3。实测对 `https://api.github.com/...` 返回 **200**。
+- 该方案既保留 certifi 的公网信任，又尊重系统信任库，因此能兼容企业代理、杀软、Steam++ 等本地拦截场景；比 `verify=False` 安全得多（后者等于放弃校验、可被任意中间人替换 EXE，绝不能用于自更新）。
+- 落地位置：`services/network_policy.py` 提供 `build_trusted_ssl_context` / `trusted_ssl_context` / `TrustedHTTPSAdapter` / `create_trusted_session`，`services/updater.py` 的两个请求入口改用之。证书库加载实测 194 张（CA 178 张），`verify_mode=CERT_REQUIRED`、`check_hostname=True` 均未放宽。
+- 范围核实：拦截**只覆盖 GitHub 系域名**；抖音 `RapidSSL/DigiCert`、小红书 `DNSPod`、Bilibili `GlobalSign` 的签发者都是各自公共 CA，未被 Steam++ 改写，因此其余下载器不受影响。
+
+顺带核对到的事实：仓库**已存在**正式 Release `tag_name=v2.4`（`published_at = 2026-07-16T02:38:09Z`），资产 `Fusion.downloader.exe`，`size = 250983923`，
+`digest = sha256:856386becc4117016ecb486a75eb74d578ead4f44a8d4c13a0ce336574257a43` —— 与本次本地 2.4.0 构建产物**完全一致**（见阶段 41）。但 `updater.py` 的 `normalized_version('v2.4')` 得到 `2.4`，`compare_versions('2.4', '2.4.0')` 经补零后为 `(2,4,0,0) == (2,4,0,0)`，**相等即判定无需更新**。故该 Release 不会触发升级提示。

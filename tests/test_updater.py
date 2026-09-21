@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import hashlib
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from services import updater
+from services import network_policy, updater
 
 
 class FakeResponse:
@@ -58,7 +59,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(asset.sha256, "a" * 64)
 
     @patch("services.updater.bypass_unreachable_loopback_proxy", return_value=nullcontext())
-    @patch("services.updater.requests.Session")
+    @patch("services.updater.create_trusted_session")
     def test_check_for_update_parses_latest_release(self, session_type, _bypass) -> None:
         session = session_type.return_value
         session.get.return_value = FakeResponse(
@@ -90,7 +91,7 @@ class ReleaseTests(unittest.TestCase):
 
 class DownloadTests(unittest.TestCase):
     @patch("services.updater.bypass_unreachable_loopback_proxy", return_value=nullcontext())
-    @patch("services.updater.requests.Session")
+    @patch("services.updater.create_trusted_session")
     def test_download_is_size_and_sha256_verified(self, session_type, _bypass) -> None:
         content = b"verified update bytes"
         digest = hashlib.sha256(content).hexdigest()
@@ -119,7 +120,7 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(progress[-1], (len(content), len(content)))
 
     @patch("services.updater.bypass_unreachable_loopback_proxy", return_value=nullcontext())
-    @patch("services.updater.requests.Session")
+    @patch("services.updater.create_trusted_session")
     def test_bad_digest_is_deleted_and_not_installed(self, session_type, _bypass) -> None:
         content = b"tampered"
         session_type.return_value.get.return_value = FakeResponse(content=content)
@@ -142,6 +143,101 @@ class DownloadTests(unittest.TestCase):
             with self.assertRaisesRegex(updater.UpdateError, "SHA-256"):
                 updater.download_update(info, Path(temp_name))
             self.assertEqual(list(update_dir.glob("*.part")), [])
+
+
+class TrustedCertificateTests(unittest.TestCase):
+    """Locks in the fix for Steam++/corporate TLS interception (2.4.1)."""
+
+    def setUp(self) -> None:
+        # The context is cached process-wide; isolate each test from the cache.
+        self._saved = network_policy._SSL_CONTEXT
+        network_policy._SSL_CONTEXT = None
+        self.addCleanup(self._restore_context)
+
+    def _restore_context(self) -> None:
+        network_policy._SSL_CONTEXT = self._saved
+
+    def test_context_loads_certifi_and_os_store(self) -> None:
+        with patch.object(network_policy.ssl, "create_default_context") as factory:
+            context = MagicMock()
+            factory.return_value = context
+            with patch("certifi.where", return_value="C:/fake/cacert.pem"):
+                built = network_policy.build_trusted_ssl_context()
+
+        self.assertIs(built, context)
+        # certifi bundle must be loaded...
+        self.assertIn("cafile", context.load_verify_locations.call_args.kwargs)
+        # ...and the OS trust store must be appended on top of it, otherwise
+        # locally installed roots (Steam++, corporate proxy) stay untrusted.
+        context.load_default_certs.assert_called_once_with(ssl.Purpose.SERVER_AUTH)
+
+    def test_context_survives_missing_certifi(self) -> None:
+        """A broken certifi install must not stop the OS store from loading."""
+        with patch.object(network_policy.ssl, "create_default_context") as factory:
+            context = MagicMock()
+            context.load_verify_locations.side_effect = OSError("no bundle")
+            factory.return_value = context
+            built = network_policy.build_trusted_ssl_context()
+
+        self.assertIs(built, context)
+        context.load_default_certs.assert_called_once_with(ssl.Purpose.SERVER_AUTH)
+
+    def test_trusted_ssl_context_is_cached(self) -> None:
+        with patch.object(
+            network_policy, "build_trusted_ssl_context", return_value=MagicMock()
+        ) as builder:
+            first = network_policy.trusted_ssl_context()
+            second = network_policy.trusted_ssl_context()
+
+        self.assertIs(first, second)
+        builder.assert_called_once()
+
+    def test_adapter_injects_context_into_pool_manager(self) -> None:
+        sentinel = MagicMock()
+        with patch.object(network_policy, "trusted_ssl_context", return_value=sentinel):
+            with patch.object(network_policy, "PoolManager") as pool_manager:
+                adapter = network_policy.TrustedHTTPSAdapter()
+                adapter.init_poolmanager(4, 4, block=False)
+
+        self.assertIs(pool_manager.call_args.kwargs["ssl_context"], sentinel)
+
+    def test_mount_trusted_https_covers_both_schemes(self) -> None:
+        session = MagicMock()
+        session.adapters = {}
+        network_policy.mount_trusted_https(session)
+
+        mounted = {call.args[0] for call in session.mount.call_args_list}
+        self.assertEqual(mounted, {"https://", "http://"})
+        https_adapter = next(
+            call.args[1] for call in session.mount.call_args_list if call.args[0] == "https://"
+        )
+        self.assertIsInstance(https_adapter, network_policy.TrustedHTTPSAdapter)
+
+    def test_update_checks_use_the_trusted_session(self) -> None:
+        """The release check must build its session through the trusting helper."""
+        session = MagicMock()
+        session.get.return_value = FakeResponse(
+            json_data={
+                "tag_name": "v2.5.0",
+                "name": "v2.5.0",
+                "body": "",
+                "html_url": "https://github.com/demo/repo/releases/tag/v2.5.0",
+                "published_at": "",
+                "draft": False,
+                "prerelease": False,
+                "assets": [],
+            }
+        )
+        with patch(
+            "services.updater.create_trusted_session", return_value=session
+        ) as factory:
+            with patch(
+                "services.updater.bypass_unreachable_loopback_proxy",
+                return_value=nullcontext(),
+            ):
+                updater.check_for_update("2.4.0")
+
+        factory.assert_called_once_with()
 
 
 class HelperLaunchTests(unittest.TestCase):

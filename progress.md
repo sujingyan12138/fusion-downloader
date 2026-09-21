@@ -801,3 +801,49 @@
   `-c http.proxy=` 与环境变量清理均无效，须以同名作用域键覆盖为空；清掉代理后出现的
   `schannel: CRYPT_E_NO_REVOCATION_CHECK` 改用系统 git 解决。
 - 未构建 EXE、未创建 GitHub Release；如需发布更新资产需另行打包。
+
+### 阶段 41：构建 2.4.0 单文件 EXE（2026-09-21）
+
+- **状态：** complete
+- 用户要求打包。构建前核对：179 项测试通过、`compileall` 通过、`APP_VERSION = "2.4.0"`。
+- 前置条件全部就位：`favicon.ico`、`assets\fonts\Geist-SemiBold.ttf` 与 `Geist-OFL.txt`、
+  `fusion_update_helper.ps1`、`.venv\Scripts\deno.exe`（99,143,968 字节）、
+  `C:\Windows\System32\ffmpeg.exe` 与 `ffprobe.exe`；无残留下载器进程。
+- 直接调用 `build_exe.ps1` 曾以 exit 1 在 13 秒内失败，且日志（UTF-16LE）只记录到依赖检查便中断。
+  逐步复现脚本全部 13 个步骤（`Join-Path`、中文 `$exeName` 码点拼接、`Get-Command ffmpeg/ffprobe`、
+  SHA-256 计算）**全部成功**，说明脚本逻辑本身无误；13 秒即退出远早于 PyInstaller 开始分析，
+  判定为通过 PowerShell 启动的长时外部进程被工具链提前终止，而非脚本缺陷。
+- 改为让 `.venv\Scripts\python.exe -m PyInstaller` 在同一工作目录直接执行、输出重定向到文件后，
+  构建正常完成（分析→打包→生成 EXE 共约 103 秒），日志中 `ERROR`/`Traceback` 计数为 0。
+- 产物：`dist\融合下载器.exe` 250,983,923 字节；复制为发布资产 `dist\Fusion Downloader.exe`（同字节数）。
+- **SHA-256：`856386becc4117016ecb486a75eb74d578ead4f44a8d4c13a0ce336574257a43`**（两个文件一致）。
+- 归档校验：onefile 包内 8 项关键资源全部存在（`favicon.ico`、`Geist-SemiBold.ttf`、`Geist-OFL.txt`、
+  `fusion_update_helper.ps1`、`deno.exe`、`ffmpeg.exe`、`ffprobe.exe`、`app.py`）；
+  从内嵌 PYZ 中提取 `app_version` 模块，其常量为 `['2.4.0']`，确认版本号已正确进入产物。
+- 冒烟测试：启动 `dist\Fusion Downloader.exe`，25 秒后进程仍存活（GUI 无崩溃），随后正常终止，无残留进程。
+- 未创建 GitHub Release；应用内“检查更新”要识别 2.4.0 仍需后续把该资产以固定名称、匹配 SHA-256 与大小发布到 Release。
+
+### 阶段 42：修复更新检查的 TLS 证书校验（2.4.1，2026-09-21）
+
+- **状态：** complete
+- 用户反馈 2.4.0 点击 `检查更新` 弹窗 `SSLCertVerificationError: unable to get local issuer certificate`。诊断确认根因是本机
+  `Steam++.Accelerator.exe` 独占监听 `0.0.0.0:443`，对 GitHub 流量做 HTTPS 中间人并改用自签名的
+  `CN=SteamTools Certificate, O=BeyondDimension` 证书；该根证书在 Windows 证书库中（浏览器因此正常），
+  但 `certifi` 的 `cacert.pem` 不含它，而 requests 默认只认 certifi。
+- 排除项已核实：系统代理 `ProxyEnable=0x0`（未启用），`ProxyServer` 仅为残留；`find_unreachable_loopback_proxy()`
+  返回 `None`，说明死代理绕过分支未触发、直连已生效；`updater.py` / `network_policy.py` 均无证书硬编码。
+- 实测确认拦截仅影响 GitHub 系域名，抖音/小红书/Bilibili 的证书签发者仍是各自的公共 CA，未被拦截。
+- `services/network_policy.py` 新增 `build_trusted_ssl_context()`（在 `certifi` 之上追加
+  `load_default_certs(ssl.Purpose.SERVER_AUTH)` 加载系统根证书库）、`trusted_ssl_context()`（进程级缓存）、
+  `TrustedHTTPSAdapter`（通过 `init_poolmanager` 注入 ssl_context）、`mount_trusted_https()`、
+  `create_trusted_session()`；两个 `load_*` 各自 try/except，certifi 或系统库任一不可用都不阻断另一侧。
+- `services/updater.py` 的 `check_for_update` 与 `download_update` 改用 `create_trusted_session()`。
+- **明确未采用 `verify=False`**：自更新场景下放弃校验等于允许中间人替换 EXE，风险不可接受；
+  新方案保持 `verify_mode=CERT_REQUIRED`、`check_hostname=True`（实测证书库加载 194 张、其中 CA 178 张）。
+- `tests/test_updater.py` 新增 `TrustedCertificateTests` 6 项：certifi 与系统库均被加载、certifi 损坏时仍加载系统库、
+  上下文缓存只构建一次、适配器把上下文注入 PoolManager、https/http 两个协议都挂载、
+  更新检查确实经过 `create_trusted_session`；3 处旧 mock 目标由 `requests.Session` 改为 `create_trusted_session`。
+- 全项目 **185 项测试通过**（179 → 185），`compileall` 与 `git diff --check` 通过。
+- 真实验证（Steam++ 保持运行）：`check_for_update()` 成功返回 v2.4 元数据；
+  对资产 `Fusion.downloader.exe` 发 HEAD 得 **200**、`Content-Length=250983923`，与本地 2.4.0 构建产物一致。
+- 版本升为 **2.4.1**；README 补充该证书错误的成因与自 2.4.1 起的行为说明。
