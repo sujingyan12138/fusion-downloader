@@ -847,3 +847,24 @@
 - 真实验证（Steam++ 保持运行）：`check_for_update()` 成功返回 v2.4 元数据；
   对资产 `Fusion.downloader.exe` 发 HEAD 得 **200**、`Content-Length=250983923`，与本地 2.4.0 构建产物一致。
 - 版本升为 **2.4.1**；README 补充该证书错误的成因与自 2.4.1 起的行为说明。
+
+### 阶段 43：提交推送 2.4.1 并打包（2026-09-21）
+
+- **状态：** complete
+- 提交 `d07f8cc`（7 个文件，+254/−8，提交信息说明证书修复的成因与取舍）。
+- 推送 `5b1043c..d07f8cc main -> main`。远端 `refs/heads/main` 与本地 HEAD 经 GitHub API 核对为同一 SHA
+  `d07f8cc934b99efbded96103d9162d9fcc7bf600`（`git ls-remote` 因代理作用域键覆盖后返回空，改用 API 验证）。
+- 打包沿用阶段 41 的可行做法（直接用 `.venv\Scripts\python.exe -m PyInstaller` 并重定向到文件），
+  约 92 秒完成，日志 `ERROR`/`Traceback` 计数为 0。
+- 产物：`dist\融合下载器.exe` 与 `dist\Fusion Downloader.exe` 均 **250,985,336 字节**（比 2.4.0 大 1,413 字节）。
+- **SHA-256：`213338608d3957584ac8fe29f620b5128178219b9b2832f37ade50fd7c280563`**（两个文件一致）。
+- 产物校验：内嵌 `app_version` 常量为 `2.4.1`；9 项资源齐全（含 `cacert.pem`）；
+  PYZ 中含 `services.network_policy`、`services.updater`、`certifi`、`certifi.core`；
+  从 `services.network_policy` 字节码中确认包含 `build_trusted_ssl_context`、`trusted_ssl_context`、
+  `load_default_certs`、`load_verify_locations`、`create_trusted_session`、`TrustedHTTPSAdapter`、
+  `init_poolmanager`，即证书修复确实进入了可执行文件。
+- 冒烟测试：启动 25 秒进程存活、GUI 无崩溃，随后正常终止，无残留进程。
+- **发布状态提醒：** 当前线上 Release 仍为 `tag_name=v2.4`（资产 SHA-256 `856386be…`，与 2.4.0 产物一致）。
+  本地 2.4.1 已比它新（`compare_versions('2.4.1','2.4') == 1`），因此在发布 2.4.1 Release 之前，
+  用 `dist\融合下载器.exe` 点“检查更新”会提示发现新版本 2.4；反之若要让软件显示“当前版本已是最新”，
+  必须先发布 tag 为 `v2.4.1` 且资产大小/SHA-256 与本次产物一致的 Release。
