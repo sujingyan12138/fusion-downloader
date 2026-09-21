@@ -786,3 +786,18 @@
 - 走真实 `run_task()` 端到端两种引擎各验证一次，均 1/1 成功、0 失败：
   内置引擎 19.43s（下载 11.91s，261.24 MB），智能/IDM 模式 20.12s（下载 13.02s）。
 - 未提交、未推送，保留用户其余工作区状态。
+
+### 阶段 40：版本升级 2.4.0 与推送（2026-09-21）
+
+- 用户要求提交并推送，并按小版本更新。`app_version.py` 由 `2.3.0` 改为 **`2.4.0`**（新增并行下载能力，属 minor）。
+- 核对 `services/updater.py` 的 `compare_versions` 使用数字分段比较，`2.4.0 > 2.3.0`、`2.4.0 == 2.4`、`2.4.0 < 2.10.0` 均正确；
+  `tests/test_updater.py` 中的 `2.3.0` 是自包含夹具数据，不随 `APP_VERSION` 变化，无需改动。
+- README 同步：抖音作品媒体条目补充"候选按无水印/分辨率/码率降序并发探测 + 4 MiB 有界并行 Range + 失败回退顺序"；
+  下载引擎条目补充内置下载器同样享受并行加速与分轨并行合并。
+- `.gitignore` 新增 `.workbuddy/`，避免把 AI 工作记忆发布到公开仓库。
+- 提交 `85df688`（8 个文件，+734/−38，新增 `downloaders/range_download.py`）；
+  推送 `1871cf5..85df688 main -> main`，核对远端 `refs/heads/main` 与本地 HEAD 完全一致。
+- 推送期间代理程序未运行。定位到用户级 gitconfig 使用 **URL 作用域代理**（`http.https://github.com/.proxy`），
+  `-c http.proxy=` 与环境变量清理均无效，须以同名作用域键覆盖为空；清掉代理后出现的
+  `schannel: CRYPT_E_NO_REVOCATION_CHECK` 改用系统 git 解决。
+- 未构建 EXE、未创建 GitHub Release；如需发布更新资产需另行打包。
