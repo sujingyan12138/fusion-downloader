@@ -761,3 +761,28 @@
 - 从 Vercel 官方 Geist 仓库引入 Geist-SemiBold.ttf 及其 OFL 许可证；本地解析结果为 Geist SemiBold，文件大小 127,872 字节。
 - MinimalHeader 现在将 Fusion Downloader 以两倍分辨率的 Geist 字形渲染后缩小，保留系统字体作为资源异常时的回退。
 - 全量 166 项测试、compileall、PowerShell 打包脚本解析和 git diff --check 通过；新构建两份 EXE 均为 250,947,880 字节，SHA-256 为 01C086A8EC20D93096DEFC6E2C4F21282BCD9C96A0FA1C6FA3A7A5BB9E0B6E25。
+
+## 阶段 39：抖音下载速度优化（2026-09-21）
+
+- 用户反馈 `v.douyin.com/R3QkLQk1HGQ`（261 MB）下载"耗时好久"，要求定位主要瓶颈并优化大头。
+- 分阶段实测定位瓶颈（详见 `findings.md`）：IDM 路径本身不是瓶颈（0.49s 接受投递、8s 下完 236 MiB）；
+  真正的三个大头是 ① 选流串行探测 19.90s ② 浏览器兜底固定开销约 5.5s ③ 内置下载单连接 7.82 MiB/s。
+- 用户确认保留 IDM 优先策略不变，选流采用"并行探测 + 提前剪枝"。
+- 新增 `downloaders/range_download.py`：把 Bilibili 已验证的有界并行 Range 实现抽成跨平台共享模块
+  （4 MiB 分段、逐块校验 206/Content-Range/长度、线程本地 Session、地址轮换、失败即删不完整文件并抛出
+  `ParallelDownloadUnavailable` 交调用方回退）。Bilibili 现有实现暂未迁移，避免在无收益的情况下改动已验证代码。
+- 抖音选流改为并行探测：`choose_best_media` / `choose_best_image` 走统一 `_choose_best_probe`，
+  最多 6 路并发、按"无水印→分辨率→码率"降序探测，已探通达到最高声明档位即停止。
+- 抖音内置下载接入并行 Range：`download_media_parallel` + `download_stream_with_fallback`，
+  ≥6 MiB 单流启用并行，源站不支持分段或任一分块校验失败即回退单连接顺序下载；音视频分轨改为两轨并行下载 + FFmpeg 合并。
+- 浏览器兜底去固定等待：`evaluate_after_navigation` 由"先 sleep(2) 再执行"改为 0.25s 轮询、拿到即返回；
+  `existing_cdp_port` 增加 `wait_for_local_port` 极短连接探测，避免为已退出进程空等 1.5s。
+- 新增 13 项速度回归测试（候选剪枝、低分回退、全不可用报错、并行为1拒绝、并行失败删除文件、
+  顺序回退、导航零固定等待、上下文销毁重试、真实错误透传、死端口快速判死等）。全项目 179 项测试通过，
+  `compileall` 与 `git diff --check` 通过。
+- 真实验证（同一链接）：选流 19.90s → **2.28s**（73 个候选，6 路并行，选中的流与串行全量探测**完全一致**：
+  1920×1080 / 247,609,506 字节 / 无水印）；内置并行下载 236.1 MiB / **7.99s = 29.54 MiB/s**（原 7.82 MiB/s，3.8×），
+  文件大小精确匹配 Content-Length；浏览器兜底 6.91–7.74s → **4.98s**。
+- 走真实 `run_task()` 端到端两种引擎各验证一次，均 1/1 成功、0 失败：
+  内置引擎 19.43s（下载 11.91s，261.24 MB），智能/IDM 模式 20.12s（下载 13.02s）。
+- 未提交、未推送，保留用户其余工作区状态。

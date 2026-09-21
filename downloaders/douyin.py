@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,7 @@ from downloaders.opencli_browser import OpenCliWindowGuard
 from requests.adapters import HTTPAdapter
 from PIL import Image, UnidentifiedImageError
 
-from . import covers
+from . import covers, range_download
 from .paths import author_output_root
 from services.cancellation import DownloadCancelled, raise_if_cancelled
 
@@ -54,6 +55,15 @@ DOUYIN_LOGIN_URL = "https://www.douyin.com/"
 NO_WINDOW_KWARGS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
 IDM_LARGE_FILE_THRESHOLD = 80 * 1024 * 1024
 IDM_VIDEO_FILE_THRESHOLD = 20 * 1024 * 1024
+# 候选探测并发上限：候选数量常达 20+，串行探测是单作品最大的固定耗时来源。
+PROBE_MAX_WORKERS = 6
+# 单流达到该大小后启用有界并行 Range，避免单连接成为吞吐瓶颈。
+PARALLEL_MEDIA_THRESHOLD_BYTES = 6 * 1024 * 1024
+# 导航后页面脚本的轮询间隔与上限（替代原先固定 2 秒等待）。
+NAVIGATION_POLL_INTERVAL = 0.25
+NAVIGATION_SETTLE_TIMEOUT = 30.0
+# 探测既有 CDP 端口的超时：端口文件在浏览器退出后不会清理，需要快速判死。
+CDP_PORT_PROBE_TIMEOUT = 0.6
 LONG_ARTICLE_IMAGE_URL_KEYS = (
     "same_url",
     "origin_image_url",
@@ -401,7 +411,18 @@ def download_note(
         media_workers = max(1, min(max_workers, 4))
 
     run_task_group(image_tasks, image_workers, note_dir, final_url, image_engine, report, logger, "图片", file_prefix=file_prefix)
-    run_task_group(video_tasks, media_workers, note_dir, final_url, engine, report, logger, "视频", file_prefix=file_prefix)
+    run_task_group(
+        video_tasks,
+        media_workers,
+        note_dir,
+        final_url,
+        engine,
+        report,
+        logger,
+        "视频",
+        file_prefix=file_prefix,
+        parallel_workers=media_workers,
+    )
 
     report["images"].sort(key=lambda item: item.get("index", 0))
     report["videos"].sort(key=lambda item: item.get("index", 0))
@@ -907,6 +928,12 @@ def launch_chromium_cdp_browser(browser_path: str, profile_dir: Path, visible: b
 
 
 def existing_cdp_port(profile_dir: Path) -> int:
+    """返回可用的既有 CDP 端口。
+
+    配置文件里的 ``DevToolsActivePort`` 在浏览器退出后不会自动清理，实测空探测
+    要花 1.5 秒。这里先做一次极短的本地连接尝试，连不上就直接判定不可用，
+    避免为已死进程反复等待超时。
+    """
     port_path = profile_dir / "DevToolsActivePort"
     if not port_path.exists():
         return 0
@@ -919,6 +946,8 @@ def existing_cdp_port(profile_dir: Path) -> int:
     port = to_int(lines[0])
     if not port:
         return 0
+    if not wait_for_local_port(port, CDP_PORT_PROBE_TIMEOUT):
+        return 0
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1.5) as response:
             if response.status < 400:
@@ -926,6 +955,21 @@ def existing_cdp_port(profile_dir: Path) -> int:
     except (OSError, urllib.error.URLError, TimeoutError):
         return 0
     return 0
+
+
+def wait_for_local_port(port: int, timeout: float) -> bool:
+    """极短超时探测本地端口是否真的在监听，避免对已退出进程等待完整超时。"""
+    if port <= 0:
+        return False
+    deadline = time.time() + max(timeout, 0.1)
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return True
+        except OSError:
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.1)
 
 
 def read_builtin_browser_aweme_snapshot(browser_path: str, url: str) -> dict:
@@ -1226,9 +1270,17 @@ def terminate_process(process: subprocess.Popen) -> None:
 
 
 def evaluate_after_navigation(cdp: "CdpClient", expression: str, timeout: int = 55):
+    """在导航后执行页面脚本。
+
+    早期实现无条件先 ``sleep(2)`` 再执行，实测同一路径中固定等待占 2 秒而
+    真正开销只有 0.7 秒。这里改为短间隔轮询：执行上下文被导航销毁时立刻重试，
+    真正拿到结果就立即返回，不再为最坏情况预先付固定等待。
+    """
     last_error: Exception | None = None
-    for attempt in range(6):
-        time.sleep(2 if attempt == 0 else 1)
+    deadline = time.time() + NAVIGATION_SETTLE_TIMEOUT
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return cdp.evaluate(expression, timeout=timeout)
         except DouyinDownloadError as exc:
@@ -1236,6 +1288,9 @@ def evaluate_after_navigation(cdp: "CdpClient", expression: str, timeout: int = 
             message = str(exc)
             if "navigated or closed" not in message and "Execution context was destroyed" not in message:
                 raise
+        if time.time() >= deadline:
+            break
+        time.sleep(NAVIGATION_POLL_INTERVAL)
     if last_error:
         raise last_error
     return {}
@@ -3014,6 +3069,7 @@ def run_task_group(
     logger: LogFn,
     label: str,
     file_prefix: str = "",
+    parallel_workers: int = 4,
 ) -> None:
     if not tasks:
         return
@@ -3023,7 +3079,17 @@ def run_task_group(
     completed_tasks = 0
     executor = ThreadPoolExecutor(max_workers=actual_workers)
     futures = [
-        executor.submit(download_media_task, kind, index, payload, note_dir, final_url, engine, file_prefix)
+        executor.submit(
+            download_media_task,
+            kind,
+            index,
+            payload,
+            note_dir,
+            final_url,
+            engine,
+            file_prefix,
+            parallel_workers,
+        )
         for kind, index, payload in tasks
     ]
     try:
@@ -3065,7 +3131,16 @@ def append_task_result(kind: str, item: dict, report: dict, logger: LogFn) -> No
         logger(f"[video {item['index']:03d}] 失败：{item['error']}")
 
 
-def download_media_task(kind: str, index: int, payload, note_dir: Path, final_url: str, engine: DownloadEngine, file_prefix: str = "") -> dict:
+def download_media_task(
+    kind: str,
+    index: int,
+    payload,
+    note_dir: Path,
+    final_url: str,
+    engine: DownloadEngine,
+    file_prefix: str = "",
+    parallel_workers: int = 4,
+) -> dict:
     session = make_session()
     start = time.perf_counter()
     try:
@@ -3107,7 +3182,15 @@ def download_media_task(kind: str, index: int, payload, note_dir: Path, final_ur
         target = unique_path(note_dir / f"{prefix}video_{index:03d}_{watermark_tag}.mp4")
         declared_dimensions = candidate_dimensions(result.candidate)
         used_idm = media_will_use_idm(engine, result)
-        bytes_count, dimensions = save_or_enqueue_media(engine, session, result, target, final_url, declared_dimensions)
+        bytes_count, dimensions = save_or_enqueue_media(
+            engine,
+            session,
+            result,
+            target,
+            final_url,
+            declared_dimensions,
+            max_workers=parallel_workers,
+        )
         item = {
             "index": index,
             "status": "ok",
@@ -3138,22 +3221,18 @@ def download_media_task(kind: str, index: int, payload, note_dir: Path, final_ur
 
 
 def choose_best_image(session: requests.Session, image: ImageItem, referer: str) -> ImageProbeResult:
-    best: ImageProbeResult | None = None
-    failures: list[str] = []
-    for candidate in image.candidates:
-        raise_if_cancelled()
-        try:
-            result = probe_image(session, candidate, referer)
-        except DownloadCancelled:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            failures.append(f"{candidate.source}: {exc}")
-            continue
-        if best is None or result.score > best.score:
-            best = result
-    if best is None:
-        raise DouyinDownloadError("所有图片候选都不可用。" + "; ".join(failures[:3]))
-    return best
+    """挑选最高质量图片候选。
+
+    候选较多时并发探测并优先保证高分候选，避免整任务卡在图片环节；
+    最终仍按完整 score 比较，质量判定不受探测顺序影响。
+    """
+    return _choose_best_probe(
+        image.candidates,
+        lambda candidate: probe_image(session, candidate, referer),
+        lambda candidate: image_candidate_priority(candidate),
+        label="图片",
+        failure_limit=3,
+    )
 
 
 def probe_image(session: requests.Session, candidate: ImageCandidate, referer: str) -> ImageProbeResult:
@@ -3194,24 +3273,102 @@ def probe_image(session: requests.Session, candidate: ImageCandidate, referer: s
 
 
 def choose_best_media(session: requests.Session, stream: dict, referer: str, source_prefix: str) -> MediaProbeResult:
+    """挑选最高质量视频候选。
+
+    分辨率/码率声明已经足够区分质量档位，因此先按声明质量降序并发探测高分候选，
+    一旦已探通的候选达到该档位上限，就不再浪费连接去探测明显更差的候选。
+    这样既保留“当前权限内最高质量”的判定，又避免为 20+ 个候选逐个串行探测。
+    """
     candidates = media_candidates(stream, source_prefix)
     if not candidates:
         raise DouyinDownloadError("没有可用视频候选链接。")
-    best: MediaProbeResult | None = None
+    return _choose_best_probe(
+        candidates,
+        lambda candidate: probe_media(session, candidate, referer),
+        lambda candidate: media_candidate_priority(candidate),
+        label="视频",
+        failure_limit=4,
+        satisfied=lambda result, best_priority: (
+            result.candidate.declared_area >= best_priority[0]
+            and (result.content_length or result.candidate.declared_size) > 0
+        ),
+    )
+
+
+def media_candidate_priority(candidate: MediaCandidate) -> tuple[int, int, int, int]:
+    """候选的声明质量排序键，与 :attr:`MediaProbeResult.score` 前几项保持一致。"""
+    return (
+        0 if candidate.watermark else 1,
+        candidate.declared_area,
+        candidate.bitrate,
+        candidate.declared_size,
+    )
+
+
+def image_candidate_priority(candidate: ImageCandidate) -> tuple[int, int, int]:
+    """图片候选的声明质量排序键。"""
+    return (
+        0 if candidate.watermark else 1,
+        0 if candidate.preview else 1,
+        candidate.declared_area,
+    )
+
+
+def _choose_best_probe(
+    candidates: list,
+    probe,
+    priority,
+    *,
+    label: str,
+    failure_limit: int,
+    satisfied=None,
+):
+    """并发探测候选并返回最优结果。
+
+    ``satisfied`` 用于提前剪枝：当某个已探通结果达到当前最优声明档位且
+    长度可用时，剩余声明档位更低的候选不再探测。
+    """
+    ordered = sorted(candidates, key=priority, reverse=True)
+    best: object | None = None
     failures: list[str] = []
-    for candidate in candidates:
-        raise_if_cancelled()
+    best_priority = priority(ordered[0])
+
+    if len(ordered) == 1:
         try:
-            result = probe_media(session, candidate, referer)
+            return probe(ordered[0])
         except DownloadCancelled:
             raise
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"{candidate.source}: {exc}")
-            continue
-        if best is None or result.score > best.score:
-            best = result
+            raise DouyinDownloadError(f"所有{label}候选都不可用。{ordered[0].source}: {exc}") from exc
+
+    workers = min(PROBE_MAX_WORKERS, len(ordered))
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = {executor.submit(probe, candidate): candidate for candidate in ordered}
+    processed: set[str] = set()
+    try:
+        for future in as_completed(futures):
+            raise_if_cancelled()
+            candidate = futures[future]
+            processed.add(candidate.url if hasattr(candidate, "url") else str(candidate))
+            try:
+                result = future.result()
+            except DownloadCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{candidate.source}: {exc}")
+                continue
+            if best is None or result.score > best.score:
+                best = result
+            if satisfied is not None and satisfied(result, best_priority):
+                for pending, pending_candidate in futures.items():
+                    if not pending.done():
+                        pending.cancel()
+                break
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
     if best is None:
-        raise DouyinDownloadError("所有视频候选都不可用。" + "; ".join(failures[:4]))
+        raise DouyinDownloadError(f"所有{label}候选都不可用。" + "; ".join(failures[:failure_limit]))
     return best
 
 
@@ -3266,14 +3423,76 @@ def save_or_enqueue_media(
     target: Path,
     referer: str,
     declared_dimensions: str = "",
+    max_workers: int = 4,
 ) -> tuple[int, str]:
     if result.candidate.audio_url:
-        return download_and_merge_media(session, result.candidate.url, result.candidate.audio_url, target, referer, declared_dimensions)
+        return download_and_merge_media(
+            session,
+            result.candidate.url,
+            result.candidate.audio_url,
+            target,
+            referer,
+            declared_dimensions,
+            max_workers=max_workers,
+        )
     size = result.content_length or result.candidate.declared_size
     if engine.should_use_idm_for_video(size):
         enqueue_idm(engine, result.candidate.url, target, referer)
         return size, declared_dimensions
+    if max_workers > 1 and size >= PARALLEL_MEDIA_THRESHOLD_BYTES:
+        parallel = download_media_parallel(
+            session,
+            result.candidate.url,
+            target,
+            referer,
+            size,
+            max_workers,
+        )
+        if parallel is not None:
+            return parallel, declared_dimensions or probe_video_dimensions(target)
     return download_media(session, result.candidate.url, target, referer, declared_dimensions)
+
+
+def media_request_headers(referer: str, accept: str = "video/mp4,video/*,*/*;q=0.8") -> dict[str, str]:
+    headers = dict(BASE_HEADERS)
+    headers["Referer"] = referer or "https://www.douyin.com/"
+    headers["Accept"] = accept
+    return headers
+
+
+def download_media_parallel(
+    session: requests.Session,
+    url: str,
+    target: Path,
+    referer: str,
+    total: int,
+    max_workers: int,
+) -> int | None:
+    """用有界并行 Range 下载单个媒体流。
+
+    源站不支持分段、签名地址失效或任何分块校验失败时返回 ``None``，
+    由调用方回退到单连接顺序下载，不会留下不完整文件。
+    """
+    if total <= 0 or max_workers <= 1:
+        return None
+    urls = unique_nonempty([normalize_url(value) for value in expanded_video_urls(url)])
+    if not urls:
+        return None
+    headers = media_request_headers(referer)
+    try:
+        range_download.download_parallel_stream(
+            urls,
+            headers,
+            target,
+            "视频",
+            total,
+            lambda _message: None,
+            max_workers=max_workers,
+        )
+    except range_download.ParallelDownloadUnavailable:
+        target.unlink(missing_ok=True)
+        return None
+    return target.stat().st_size if target.is_file() else None
 
 
 def media_will_use_idm(engine: DownloadEngine, result: MediaProbeResult) -> bool:
@@ -3291,6 +3510,35 @@ def enqueue_idm(engine: DownloadEngine, url: str, target: Path, referer: str) ->
         subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, **NO_WINDOW_KWARGS)
     except (OSError, subprocess.SubprocessError) as exc:
         raise DouyinDownloadError(f"投递 IDM 失败：{exc}") from exc
+
+
+def download_stream_with_fallback(
+    session: requests.Session,
+    url: str,
+    target: Path,
+    referer: str,
+    accept: str,
+    max_workers: int = 4,
+) -> int:
+    """优先并行 Range，失败则回退单连接顺序下载。
+
+    并行只是加速手段，因此任何不可用情况都必须能安全退回已验证的
+    顺序路径，而不是让整个下载失败。
+    """
+    if max_workers > 1:
+        total = 0
+        probe_headers = media_request_headers(referer, accept)
+        try:
+            probe = session.head(url, headers=probe_headers, timeout=(4, 10), allow_redirects=True)
+            if probe.status_code < 400:
+                total = content_length_from_headers(probe.headers)
+        except requests.RequestException:
+            total = 0
+        if total >= PARALLEL_MEDIA_THRESHOLD_BYTES:
+            result = download_media_parallel(session, url, target, referer, total, max_workers)
+            if result is not None:
+                return result
+    return download_binary(session, url, target, referer, accept=accept)
 
 
 def download_media(session: requests.Session, url: str, target: Path, referer: str, declared_dimensions: str = "") -> tuple[int, str]:
@@ -3333,6 +3581,7 @@ def download_and_merge_media(
     target: Path,
     referer: str,
     declared_dimensions: str = "",
+    max_workers: int = 4,
 ) -> tuple[int, str]:
     ffmpeg = find_executable("ffmpeg")
     if not ffmpeg:
@@ -3343,8 +3592,28 @@ def download_and_merge_media(
         temp_path = Path(temp_dir)
         video_path = temp_path / "video.mp4"
         audio_path = temp_path / "audio.m4a"
-        download_binary(session, video_url, video_path, referer, accept="video/mp4,video/*,*/*;q=0.8")
-        download_binary(session, audio_url, audio_path, referer, accept="audio/*,video/mp4,*/*;q=0.8")
+        # 视频轨通常远大于音频轨，两轨并行下载以缩短整体等待。
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            video_future = executor.submit(
+                download_stream_with_fallback,
+                session,
+                video_url,
+                video_path,
+                referer,
+                "video/mp4,video/*,*/*;q=0.8",
+                max_workers,
+            )
+            audio_future = executor.submit(
+                download_stream_with_fallback,
+                session,
+                audio_url,
+                audio_path,
+                referer,
+                "audio/*,video/mp4,*/*;q=0.8",
+                max_workers,
+            )
+            video_future.result()
+            audio_future.result()
         merged_path = temp_path / "merged.mp4"
         result = subprocess.run(
             [

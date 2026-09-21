@@ -4,6 +4,7 @@ __pycache__/
 build/
 dist/
 *.spec
+.workbuddy/
 下载结果/
 下载器设置.json
 抖音浏览器登录态/

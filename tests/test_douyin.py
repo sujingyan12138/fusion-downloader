@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -423,6 +424,166 @@ class DouyinCollectionIdTests(unittest.TestCase):
         )
 
         self.assertEqual(collections, [{"id": "7655694467143407401", "name": "图片", "count": ""}])
+
+
+class DouyinDownloadSpeedTests(unittest.TestCase):
+    """覆盖 2026-09-21 的三项提速改动，防止质量判定或回退行为被削弱。"""
+
+    def test_candidate_priority_ranks_watermark_resolution_bitrate(self) -> None:
+        low = douyin.MediaCandidate(url="https://a/1.mp4", source="s", width=1280, height=720, bitrate=1000)
+        high = douyin.MediaCandidate(url="https://a/2.mp4", source="s", width=1920, height=1080, bitrate=2000)
+        marked = douyin.MediaCandidate(
+            url="https://a/3.mp4", source="s", width=3840, height=2160, bitrate=9000, watermark=True
+        )
+
+        ordered = sorted([marked, low, high], key=douyin.media_candidate_priority, reverse=True)
+
+        # 无水印优先，其次分辨率，再次码率；水印候选即使分辨率更高也不排在前面。
+        self.assertEqual([item.url for item in ordered], [high.url, low.url, marked.url])
+
+    def test_choose_best_media_prunes_low_priority_candidates(self) -> None:
+        """高分辨率候选先探通后，不再浪费连接探测明显更差的候选。"""
+        stream = {
+            "bit_rate": [
+                {"play_addr": {"url_list": ["https://a/low.mp4"]}, "width": 640, "height": 360, "bit_rate": 500},
+                {"play_addr": {"url_list": ["https://a/high.mp4"]}, "width": 1920, "height": 1080, "bit_rate": 4000},
+            ]
+        }
+        probed: list[str] = []
+
+        def fake_probe(_session, candidate, _referer):
+            probed.append(candidate.url)
+            return douyin.MediaProbeResult(candidate=candidate, content_length=1000, content_type="video/mp4")
+
+        with patch.object(douyin, "probe_media", side_effect=fake_probe):
+            best = douyin.choose_best_media(object(), stream, "https://www.douyin.com/", "video_001")
+
+        self.assertEqual(best.candidate.declared_area, 1920 * 1080)
+        self.assertIn("https://a/high.mp4", probed)
+
+    def test_choose_best_media_falls_back_to_lower_candidate_when_best_is_unreachable(self) -> None:
+        """高分候选不可用时必须继续探测低分候选，不能直接失败。"""
+        stream = {
+            "bit_rate": [
+                {"play_addr": {"url_list": ["https://a/broken.mp4"]}, "width": 1920, "height": 1080, "bit_rate": 4000},
+                {"play_addr": {"url_list": ["https://a/ok.mp4"]}, "width": 1280, "height": 720, "bit_rate": 1500},
+            ]
+        }
+
+        def fake_probe(_session, candidate, _referer):
+            if "broken" in candidate.url:
+                raise douyin.DouyinDownloadError("HTTP 403")
+            return douyin.MediaProbeResult(candidate=candidate, content_length=2048, content_type="video/mp4")
+
+        with patch.object(douyin, "probe_media", side_effect=fake_probe):
+            best = douyin.choose_best_media(object(), stream, "https://www.douyin.com/", "video_001")
+
+        self.assertEqual(best.candidate.width, 1280)
+
+    def test_choose_best_media_reports_failure_when_every_candidate_is_unreachable(self) -> None:
+        stream = {"play_addr": {"url_list": ["https://a/only.mp4"]}, "width": 640, "height": 360}
+
+        with patch.object(douyin, "probe_media", side_effect=douyin.DouyinDownloadError("HTTP 404")):
+            with self.assertRaises(douyin.DouyinDownloadError):
+                douyin.choose_best_media(object(), stream, "https://www.douyin.com/", "video_001")
+
+    def test_parallel_download_declines_when_worker_count_is_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            target = Path(temp_name, "out.mp4")
+            result = douyin.download_media_parallel(
+                MagicMock(), "https://a/v.mp4", target, "https://www.douyin.com/", 8 * 1024 * 1024, 1
+            )
+
+        self.assertIsNone(result)
+
+    def test_parallel_download_discards_target_when_ranges_are_unavailable(self) -> None:
+        """并行失败必须删除不完整文件并返回 None，交给调用方回退顺序下载。"""
+        with tempfile.TemporaryDirectory() as temp_name:
+            target = Path(temp_name, "out.mp4")
+            with patch(
+                "downloaders.douyin.range_download.download_parallel_stream",
+                side_effect=douyin.range_download.ParallelDownloadUnavailable("no range"),
+            ):
+                result = douyin.download_media_parallel(
+                    MagicMock(), "https://a/v.mp4", target, "https://www.douyin.com/", 8 * 1024 * 1024, 4
+                )
+
+            self.assertIsNone(result)
+            self.assertFalse(target.exists())
+
+    def test_stream_with_fallback_uses_sequential_when_parallel_fails(self) -> None:
+        session = MagicMock()
+        session.head.return_value = SimpleNamespace(
+            status_code=200, headers={"Content-Length": str(8 * 1024 * 1024)}
+        )
+        with tempfile.TemporaryDirectory() as temp_name:
+            target = Path(temp_name, "out.mp4")
+            with patch.object(douyin, "download_media_parallel", return_value=None) as parallel, patch.object(
+                douyin, "download_binary", return_value=12345
+            ) as sequential:
+                written = douyin.download_stream_with_fallback(
+                    session, "https://a/v.mp4", target, "https://www.douyin.com/", "video/*", 4
+                )
+
+        self.assertEqual(written, 12345)
+        parallel.assert_called_once()
+        sequential.assert_called_once()
+
+    def test_navigation_polling_returns_immediately_without_fixed_wait(self) -> None:
+        """导航后应立即执行脚本，不再为最坏情况预先固定等待 2 秒。"""
+        cdp = MagicMock()
+        cdp.evaluate.return_value = {"ok": True}
+
+        started = time.perf_counter()
+        result = douyin.evaluate_after_navigation(cdp, "1")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertLess(time.perf_counter() - started, 1.0)
+        cdp.evaluate.assert_called_once()
+
+    def test_navigation_polling_retries_after_context_destroyed(self) -> None:
+        cdp = MagicMock()
+        cdp.evaluate.side_effect = [
+            douyin.DouyinDownloadError("Execution context was destroyed."),
+            {"ok": True},
+        ]
+
+        with patch.object(douyin, "NAVIGATION_POLL_INTERVAL", 0.01):
+            result = douyin.evaluate_after_navigation(cdp, "1")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(cdp.evaluate.call_count, 2)
+
+    def test_navigation_polling_propagates_real_errors(self) -> None:
+        cdp = MagicMock()
+        cdp.evaluate.side_effect = douyin.DouyinDownloadError("页面脚本语法错误")
+
+        with self.assertRaises(douyin.DouyinDownloadError):
+            douyin.evaluate_after_navigation(cdp, "1")
+
+        cdp.evaluate.assert_called_once()
+
+    def test_dead_cdp_port_is_rejected_quickly(self) -> None:
+        """端口文件存在但进程已退出时，不应等待完整 HTTP 超时。"""
+        with tempfile.TemporaryDirectory() as temp_name:
+            profile = Path(temp_name)
+            Path(profile, "DevToolsActivePort").write_text("59999\n/devtools/browser/x\n", encoding="utf-8")
+
+            started = time.perf_counter()
+            port = douyin.existing_cdp_port(profile)
+
+            self.assertEqual(port, 0)
+            self.assertLess(time.perf_counter() - started, 2.0)
+
+    def test_missing_cdp_port_file_returns_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            self.assertEqual(douyin.existing_cdp_port(Path(temp_name)), 0)
+
+    def test_media_request_headers_carry_referer_and_accept(self) -> None:
+        headers = douyin.media_request_headers("https://www.douyin.com/video/1")
+
+        self.assertEqual(headers["Referer"], "https://www.douyin.com/video/1")
+        self.assertIn("video", headers["Accept"])
 
 
 if __name__ == "__main__":

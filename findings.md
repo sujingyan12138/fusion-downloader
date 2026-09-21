@@ -375,3 +375,30 @@
 - 用户反馈的页头字体问题只影响英文产品名；不应为此替换整套中文界面字体。
 - 采用 Vercel Geist Sans SemiBold：官方仓库说明其适用于标题和大字号界面，且以 SIL Open Font License 1.1 发布。
 - Tkinter 不会自动使用应用私有字体文件，因此通过 Pillow 从内置 TTF 渲染标题图像；中文正文继续由 Microsoft YaHei UI 负责。
+
+## 2026-09-21 下载耗时瓶颈实测（抖音 v.douyin.com/R3QkLQk1HGQ）
+
+用户反馈该 261 MB 视频"耗时好久"。分阶段实测（本机，无代理）：
+
+| 阶段 | 实测耗时 | 结论 |
+|------|---------|------|
+| `fetch_page` 短链→HTML | **4.5–6.6s** | 拿到 72 KB HTML，但内容为抖音 JSVMP 混淆脚本，无 RENDER_DATA |
+| `fetch_aweme_detail` 直接 API | 0.1–1.9s | HTTP 200 但 **body 长度 0** |
+| 内置浏览器兜底（当前实现） | **6.9–7.7s** | 成功拿到 154 个字段的完整详情 |
+| └ `existing_cdp_port` | 1.56s | 端口文件存在但进程已死，空探测 |
+| └ 启动 Chrome 进程 | 0.37s | |
+| └ `wait_for_devtools_port` | 0.51s | |
+| └ `Page.navigate` | **2.11s** | |
+| └ **固定 `sleep(2)`** | **2.00s** | 纯浪费 |
+| └ 快照脚本首次执行 | 0.69s | 一次即拿到详情 |
+| 选流 `choose_best_media` | **19.90s** | 对全部候选逐个 HEAD/GET 探测 |
+| 内置顺序下载 | 236 MiB / 30.2s = **7.82 MiB/s** | |
+| 4 路并行 Range | 236 MiB / 9.16s = **25.79 MiB/s** | 3.3 倍提速 |
+| 8 路并行 Range | 236 MiB / 9.88s = 23.89 MiB/s | 无额外收益 |
+| IDM 投递（本地代理） | 0.49s 返回；**8s 内下完 236 MiB** | IDM 本身极快 |
+
+结论：
+1. **IDM 不是瓶颈**，本地 HeaderProxy 透传 5.27 MiB/s 也够用。
+2. `sleep(2)` + 端口空探测 + `Page.navigate` 阻塞 = 约 5.5s 固定开销，实测无固定 sleep 路径仅 **1.99s** 完成同一件事。
+3. **最大单点瓶颈是 `choose_best_media` 的 19.9s 串行候选探测**——候选可达 20+ 个，每个都要 HEAD→（失败再 GET Range）。
+4. 内置下载顺序单连接只有 7.82 MiB/s；项目已有成熟的 `bilibili.download_parallel_stream`（4 MiB 分块 + 逐块校验 + 串行回退），但抖音未接入。
