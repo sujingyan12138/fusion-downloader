@@ -8,6 +8,12 @@
 - 版本更新后再次通过 195 项测试、compileall、diff --check 与真实 Tkinter 知乎任务选项回归。
 - 使用现有打包依赖生成 `dist/v2.4.2/Fusion Downloader.exe`，251,158,932 字节，SHA-256 `2b5e884f1f5a739d296749e43b9cefb5d52bdcecca88471346dbbd943e12e909`。归档确认 app_version=2.4.2、知乎 profile 修复及必需运行时齐全，无登录态/用户设置；本地独立设置继续指向原 `dist/下载结果/`。
 - 正式 2.4.2 EXE 实际启动后窗口响应，发送正常关闭成功；单文件父进程清理超过首次 15 秒等待，后续只读复查确认两个本次进程均已退出，无强制终止。
+- 已审阅并精确暂存 8 个文件，暂存 diff --check 与凭据模式检查通过。源码提交 `1017703202d29a60b3d3eb6dd3edf28392efbf04`（`fix: 修复知乎多 profile 读取并升级至 2.4.2`）已推送 origin/main，git ls-remote 与本地 HEAD 一致。
+- 已创建 v2.4.2 草稿 Release（ID `416366761`），目标固定为上述源码提交，正在上传 EXE；上传资产通过大小和 GitHub SHA-256 校验前不发布。
+- 首次上传发生 TLS socket 写入超时；API 确认留下本次未完成 `starter` 资产、digest 为空，尚未发布。现有系统代理 `127.0.0.1:10808` 可达，上传主机探针响应正常；复核本次占位项后清理，第二次将大文件写入等待提高到 120 秒，不改系统/全局代理。
+- 用户收尾要求：上传发布完成即结束；本次发布验收以资产大小、GitHub SHA-256、版本标签和正式 Release 状态核对为准。
+- 上传重试成功（HTTP 201）。正式资产 ID `653121928`，GitHub 将文件名空格规范化为 `Fusion.Downloader.exe`，大小 251,158,932 字节，digest `sha256:2b5e884f1f5a739d296749e43b9cefb5d52bdcecca88471346dbbd943e12e909` 与本地一致；草稿中只存在这一项完整资产。
+- v2.4.2 已发布为正式稳定版并设为 latest：https://github.com/sujingyan12138/fusion-downloader/releases/tag/v2.4.2 。远端标签 v2.4.2 已核对指向源码提交 `1017703202d29a60b3d3eb6dd3edf28392efbf04`。按用户收尾要求，确认正式状态与完整资产后结束。
 
 ## 阶段 44：知乎 OpenCLI 多 profile（2026-10-18）
 - 初始 Git 工作区干净；已核对根目录 AGENTS、三份规划、知乎源码、窗口清理器与测试。
