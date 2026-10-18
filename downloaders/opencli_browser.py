@@ -116,6 +116,22 @@ def run_opencli_json(
     timeout_seconds: int = 60,
 ):
     """Run one OpenCLI command and decode its first JSON envelope."""
+    stdout = run_opencli_text(args, cwd=cwd, timeout_seconds=timeout_seconds)
+    try:
+        result, _ = json.JSONDecoder().raw_decode(stdout.lstrip())
+        return result
+    except json.JSONDecodeError as exc:
+        preview = re.sub(r"\s+", " ", stdout).strip()[:300]
+        raise RuntimeError(f"无法解析 OpenCLI 返回值：{preview}") from exc
+
+
+def run_opencli_text(
+    args: list[str],
+    *,
+    cwd: str | Path,
+    timeout_seconds: int = 60,
+) -> str:
+    """Run a command, including CLI operations that return a text acknowledgement."""
     command = opencli_command()
     if not command:
         raise RuntimeError("未找到 OpenCLI。")
@@ -142,12 +158,39 @@ def run_opencli_json(
         raise RuntimeError(
             f"OpenCLI 执行失败：{detail or f'退出码 {completed.returncode}'}"
         )
+    return completed.stdout
+
+
+def opencli_profile_candidates(*, cwd: str | Path) -> list[str | None]:
+    """Respect explicit/default selection; otherwise try at most four live profiles.
+
+    `profile list` in OpenCLI 1.8.3 is text-only. Match connected rows, never
+    disconnected saved aliases or advisory output. Do not change global defaults.
+    """
+    requested = os.environ.get("OPENCLI_PROFILE", "").strip()
+    if requested:
+        return [requested]
     try:
-        result, _ = json.JSONDecoder().raw_decode(completed.stdout.lstrip())
-        return result
-    except json.JSONDecodeError as exc:
-        preview = re.sub(r"\s+", " ", completed.stdout).strip()[:300]
-        raise RuntimeError(f"无法解析 OpenCLI 返回值：{preview}") from exc
+        stdout = run_opencli_text(["profile", "list"], cwd=cwd, timeout_seconds=15)
+    except RuntimeError as exc:
+        # Older OpenCLI versions have no multi-profile command.
+        if "unknown command" in str(exc).lower():
+            return [None]
+        raise
+    stdout = re.sub(r"\x1b\[[0-9;]*m", "", stdout)
+    profiles: list[str] = []
+    for line in stdout.splitlines():
+        match = re.fullmatch(
+            r"\s*([\w.:-]+)(.*?)\s+[—–-]\s+connected(?:\s.*)?", line
+        )
+        if not match:
+            continue
+        context_id, labels = match.groups()
+        if "default" in labels.split():
+            return [context_id]
+        if context_id not in profiles:
+            profiles.append(context_id)
+    return profiles[:4] or [None]
 
 
 def _is_opencli_blank(title: str) -> bool:

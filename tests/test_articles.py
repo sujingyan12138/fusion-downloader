@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import os
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -417,6 +419,22 @@ class WechatArticleTests(unittest.TestCase):
 
 
 class ZhihuArticleTests(unittest.TestCase):
+    @patch("downloaders.zhihu.extract_via_builtin_browser")
+    @patch("downloaders.zhihu.extract_via_opencli")
+    @patch("downloaders.zhihu.opencli_command", return_value=["opencli"])
+    @patch("downloaders.zhihu.extract_via_http", side_effect=zhihu.ZhihuDownloadError("HTTP 403"))
+    def test_http_403_uses_profile_fallback_before_builtin(self, http, command, browser, builtin):
+        expected = article_common.WebArticle(
+            platform="知乎", source_type="zhihu_zhuanlan",
+            source_url="https://zhuanlan.zhihu.com/p/123",
+            canonical_url="https://zhuanlan.zhihu.com/p/123",
+            content_id="123", title="专栏标题", author="文章作者",
+            body_html="<p>从正常浏览器会话中读取的完整目标文章内容。</p>",
+        )
+        browser.return_value = expected
+        self.assertIs(zhihu.fetch_article(expected.source_url), expected)
+        builtin.assert_not_called()
+
     def test_extracts_answer_url_and_rejects_question_only(self) -> None:
         share = (
             "怎样才能叫做真正会科研的人？ - 回答 - 知乎 "
@@ -456,8 +474,10 @@ class ZhihuArticleTests(unittest.TestCase):
 
     @patch("downloaders.zhihu.OpenCliWindowGuard")
     @patch("downloaders.zhihu.run_opencli")
+    @patch("downloaders.zhihu.opencli_profile_candidates", return_value=["chrome-work"])
     def test_opencli_session_always_releases_and_closes_owned_window(
         self,
+        _profiles,
         run_opencli,
         window_guard_type,
     ) -> None:
@@ -489,6 +509,102 @@ class ZhihuArticleTests(unittest.TestCase):
             2,
         )
         window_guard_type.return_value.close_released_window.assert_called_once_with()
+        self.assertTrue(all(
+            call.kwargs["profile"] == "chrome-work"
+            for call in run_opencli.call_args_list
+        ))
+        self.assertFalse(run_opencli.call_args_list[-1].kwargs["json_output"])
+
+    @patch("downloaders.zhihu.OpenCliWindowGuard")
+    @patch("downloaders.zhihu.run_opencli")
+    @patch("downloaders.zhihu.opencli_profile_candidates", return_value=["blocked", "working"])
+    def test_opencli_tries_next_profile_and_cleans_both(self, _profiles, run_cli, guards):
+        run_cli.side_effect = [
+            {}, {"error": "request_blocked"}, "released",
+            {}, {
+                "title": "专栏标题", "author": "文章作者", "articleId": "123",
+                "bodyHtml": "<p>足够长的目标专栏正文，不能把异常请求页面当成成功的文章保存。</p>",
+            }, "released",
+        ]
+        article = zhihu.extract_via_opencli("https://zhuanlan.zhihu.com/p/123")
+        self.assertEqual(article.content_id, "123")
+        self.assertEqual(
+            [call.kwargs["profile"] for call in run_cli.call_args_list],
+            ["blocked"] * 3 + ["working"] * 3,
+        )
+        self.assertEqual(guards.return_value.close_released_window.call_count, 2)
+        sessions = [call.args[0][1] for call in run_cli.call_args_list]
+        self.assertEqual(len(set(sessions[:3])), 1)
+        self.assertNotEqual(sessions[0], sessions[3])
+
+    @patch("downloaders.zhihu.OpenCliWindowGuard")
+    @patch("downloaders.zhihu.run_opencli")
+    @patch("downloaders.zhihu.opencli_profile_candidates", return_value=["broken"])
+    def test_failed_open_still_releases_same_profile(self, _profiles, run_cli, guards):
+        run_cli.side_effect = [subprocess.TimeoutExpired("opencli", 60), "released"]
+        with self.assertRaisesRegex(zhihu.ZhihuDownloadError, "profile broken"):
+            zhihu.extract_via_opencli("https://zhuanlan.zhihu.com/p/123")
+        self.assertEqual(run_cli.call_args_list[-1].args[0][-1], "close")
+        self.assertEqual(run_cli.call_args_list[-1].kwargs["profile"], "broken")
+        guards.return_value.close_released_window.assert_called_once()
+
+    @patch("downloaders.zhihu.run_opencli_text", return_value="Browser session tab lease released")
+    def test_close_accepts_plain_text_and_passes_explicit_profile(self, run_text):
+        value = zhihu.run_opencli(
+            ["browser", "test-session", "close"], profile="chosen", json_output=False,
+        )
+        self.assertIn("released", value)
+        self.assertEqual(
+            run_text.call_args.args[0],
+            ["--profile", "chosen", "browser", "test-session", "close"],
+        )
+
+    def test_browser_payload_rejects_wrong_article(self):
+        with self.assertRaisesRegex(zhihu.ZhihuDownloadError, "ID 与目标链接不符"):
+            zhihu.article_from_payload({
+                "title": "另一个文章", "articleId": "999",
+                "bodyHtml": "<p>足够长的正文，但是内容来自另一个文章，不能保存为用户的目标文章。</p>",
+            }, "https://zhuanlan.zhihu.com/p/123")
+
+
+@patch.dict(os.environ, {}, clear=True)
+class OpenCliProfileTests(unittest.TestCase):
+    @patch("downloaders.opencli_browser.run_opencli_text")
+    def test_connected_profiles_exclude_saved_disconnected_and_limit_attempts(self, run_text):
+        run_text.return_value = (
+            "Connected Browser Bridge profiles\n"
+            "\x1b[32m  p1 personal — connected v1.0.24\x1b[0m\n"
+            "  p2 — connected version unknown\n"
+            "  p2 — connected v1.0.24\n"
+            "  p3 — connected v1.0.24\n  p4 — connected v1.0.24\n"
+            "  p5 — connected v1.0.24\n"
+            "Disconnected saved profiles:\n  old default — not connected\n"
+        )
+        self.assertEqual(
+            opencli_browser.opencli_profile_candidates(cwd="."), ["p1", "p2", "p3", "p4"],
+        )
+
+    @patch("downloaders.opencli_browser.run_opencli_text")
+    def test_default_profile_is_pinned_even_if_not_first(self, run_text):
+        run_text.return_value = "  first — connected v1\n  second work default — connected v1\n"
+        self.assertEqual(opencli_browser.opencli_profile_candidates(cwd="."), ["second"])
+
+    @patch.dict(os.environ, {"OPENCLI_PROFILE": " work "})
+    @patch("downloaders.opencli_browser.run_opencli_text")
+    def test_explicit_profile_is_respected_without_enumerating_others(self, run_text):
+        self.assertEqual(opencli_browser.opencli_profile_candidates(cwd="."), ["work"])
+        run_text.assert_not_called()
+
+    @patch("downloaders.opencli_browser.run_opencli_text")
+    def test_single_profile_and_legacy_cli_remain_supported(self, run_text):
+        run_text.return_value = "  only — connected v1.0.24\n"
+        self.assertEqual(opencli_browser.opencli_profile_candidates(cwd="."), ["only"])
+        run_text.side_effect = RuntimeError("unknown command 'profile'")
+        self.assertEqual(opencli_browser.opencli_profile_candidates(cwd="."), [None])
+
+    @patch("downloaders.opencli_browser.run_opencli_text", return_value="No Browser Bridge profiles connected.")
+    def test_no_profiles_uses_existing_connection_error_path(self, run_text):
+        self.assertEqual(opencli_browser.opencli_profile_candidates(cwd="."), [None])
 
 
 class OpenCliWindowGuardTests(unittest.TestCase):

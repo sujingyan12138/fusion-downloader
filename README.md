@@ -1,6 +1,9 @@
 # 融合下载器
 
 Windows 本地 GUI，整合抖音、小红书、Bilibili、YouTube、TikTok、微信和知乎下载能力。
+
+当前版本：**v2.4.2**。修复多个 OpenCLI Browser Bridge profile 同时连接时的知乎正文读取失败，并保证会话打开、提取和释放使用同一 profile。
+
 ## 界面展示
 
 ![image-20260806141219739](./assets/image-20260806141219739.png)
@@ -20,6 +23,9 @@ Windows 本地 GUI，整合抖音、小红书、Bilibili、YouTube、TikTok、�
 - 微信公众号文章与贴图：选择“微信”后可粘贴 `mp.weixin.qq.com` 公开文章、`pages/image_detail` 贴图链接及含链接的分享文案，软件会自动识别内容类型。文章与贴图保存为 UTF-8 Markdown；贴图只收集作品画廊图片，不混入头像、二维码和操作引导图。贴图会依次尝试作者上传原文件 `original_info`、无水印 CDN 原图 `cdn_url` 和水印兜底图 `watermark_info`，再按实际解码像素和有效字节数选择最高质量候选写入同级 `assets/`；因此原文件可用时不会停留在网页展示的 2560×3840 版本。普通请求触发微信访问验证时会自动复用当前 Chrome/OpenCLI 会话。
 - 微信视频号：支持 `weixin.qq.com/sph/...` 和对应的 `channels.weixin.qq.com/finder-preview/pages/sph?id=...` 分享链接。实现参考 [wx_channels_download](https://github.com/ltaoo/wx_channels_download) 的公开分享解析与“原始视频”规则，通过其公开解析服务取得短期媒体地址，再只保留 `encfilekey` 与 `token` 请求原始质量；原始地址不可用时才在 H.264/H.265 在线候选中回退。下载前核验媒体响应，完成后使用 FFprobe 确认视频轨、音频轨、分辨率、帧率和编码；不会安装根证书、启动 MITM 代理或修改系统代理。该入口依赖第三方公开解析服务，服务不可用时会明确报错。
 - 知乎回答/专栏：支持 `/question/.../answer/...` 回答链接和 `zhuanlan.zhihu.com/p/...` 专栏链接，只提取目标回答或目标文章正文；普通请求受限时会依次复用当前 Chrome/OpenCLI 会话和软件专属知乎登录态。
+
+知乎的 OpenCLI 回退支持多个 Browser Bridge profile 同时连接：设置 `OPENCLI_PROFILE` 或通过 `opencli profile use <名称>` 选定后，仅使用该 profile；未指定时，最多依次尝试 4 个已连接 profile。每次任务的打开、读取和关闭都会绑定同一 profile，不修改 OpenCLI 全局配置。需要限定账号时，可先用 `opencli profile list` 查看名称，再设置默认 profile。知乎自身仍可能限制请求，选择 profile 不保证解除站点限制。
+
 - 可选最高质量作品封面：勾选 `同时保存最高质量作品封面` 会在原任务之外额外保存封面；勾选 `仅下载最高质量作品封面` 则只解析和保存封面，不传输视频、图片媒体或评论内容。两种模式覆盖抖音、小红书、Bilibili、YouTube、TikTok 五个媒体平台的单个、批量与收藏入口，并按实际解码像素、非预览/非水印和有效字节数择优，而不是只相信 URL 名称或声明尺寸。微信使用自动识别模式、知乎使用文章模式，两者不显示封面选项。
 - 自动检测 IDM：有 IDM 时用于适合的大文件下载；没有时使用内置并发下载器。大视频优先投递 IDM；切到内置下载器时同样享受上述并行 Range 加速（含音视频分轨作品的并行下载与 FFmpeg 无重编码合并）。
 - 网络与终止保护：可用的系统代理会照常使用；若 Windows/进程残留的本机代理端口已经关闭，本次任务会自动改用直连并在结束后恢复环境，不会修改系统代理设置。下载运行时主按钮会变为 `终止下载`，可停止后续解析、候选探测和下载；正在阻塞的单次网络请求会在返回或超时后退出。

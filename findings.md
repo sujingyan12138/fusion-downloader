@@ -1,5 +1,17 @@
 # 发现与决策：融合下载器平台扩展
 
+## v2.4.2 发布前状态（2026-10-18）
+- GitHub API 实时确认现有最新稳定 Release 为 `v2.4.1`，资产 `Fusion.downloader.exe`，250,985,336 字节，GitHub digest 与原 2.4.1 本地文件 SHA-256 一致。旧项目日志中“线上仍为 v2.4”的说明属于当时状态，目前已过时。
+- 更新器支持 `Fusion.Downloader.exe`、`Fusion Downloader.exe` 和中文历史名称；安全更新依赖 GitHub 资产 `digest` 字段中的 SHA-256 与精确文件大小。新版应先上传到草稿 Release，确认两个值后再正式发布。
+
+## 知乎 OpenCLI 多 profile（2026-10-18）
+- 用户链接：`https://zhuanlan.zhihu.com/p/16401759489`。旧路径依次为公开 HTTP、当前 Chrome/OpenCLI、软件独立 CDP 登录态；用户日志中 HTTP 与独立登录态均被知乎 `40362` 拦截，OpenCLI 则在读取前因多个 profile 未指定而失败。
+- 实机 OpenCLI 1.8.3、Browser Bridge 1.0.24，`profile list` 确认两个已连接 profile；此版本 `profile list` 没有 JSON 输出参数。已安装源码输出每行为 `contextId [alias] [default] — connected ...`，断开项为 `— not connected`。
+- 官方文档 https://github.com/jackwener/opencli/blob/main/README.md 说明多 profile 必须明确选择；支持根参数 `--profile` 与环境变量 `OPENCLI_PROFILE`。实际 `--profile <id> browser ... tab list/open` 成功，而此版本 doctor 仍误报多 profile，不能单靠 doctor 判定浏览器不可用。
+- 修复范围限知乎：尊重指定/默认 profile；未指定时有界尝试连接列表，每次会话固定 profile，失败与释放也不跨 profile；不写全局默认配置、不读取 Cookie。
+- 显式 profile 的真实页面成功：标题“初一至初三，2024年初中数学知识点总结大全！（可打印）”，作者“是一个爱好者”，文章 ID `16401759489`，发布日期 `2025-01-04T11:43:32.000Z`。正文主要由图片承载，29 张图片中 21 张为 1080×1528，其余为不同尺寸的附图/条幅。原有专栏选择器仍有效。
+- OpenCLI 1.8.3 的 `browser <session> close` 成功时返回纯文本 `Browser session tab lease released`，不能按 JSON 解析；知乎已改用文本 runner 接收关闭确认。
+
 ## Bilibili 下载速度优化（2026-07-24）
 
 - 当前 Bilibili 解析与质量选择没有问题，真正的单视频瓶颈在 `download_stream()`：虽然以 4 MiB 做 Range 分块，但代码明确丢弃 `max_workers`，所有分块串行传输。

@@ -1,5 +1,27 @@
 # 进度日志：融合下载器平台扩展
 
+## 阶段 45：v2.4.2 提交、打包与 GitHub Release（2026-10-18）
+- 用户授权升级一个小版本并上传 GitHub，同时尝试软件 Release 上传。使用现有仓库 `sujingyan12138/fusion-downloader`，不引入其他发布目标。
+- 当前 main、远端 refs/heads/main 与 API 均为 `29b6d82a70f7c4ee63a34404dfe05533744e2a25`；7 个已有修改均来自本次知乎修复，无暂存或额外未跟踪文件。
+- GitHub CLI 未安装；使用现有 Git Credential Manager 凭据在进程内认证 GitHub REST API，凭据不落盘、不输出。仓库为现有公开仓库，当前凭据具备 push/admin 权限；API 确认最新稳定版是 v2.4.1。
+- 版本升至 2.4.2，准备独立构建、提交与草稿 Release 资产校验；只有校验成功后才正式发布。
+- 版本更新后再次通过 195 项测试、compileall、diff --check 与真实 Tkinter 知乎任务选项回归。
+- 使用现有打包依赖生成 `dist/v2.4.2/Fusion Downloader.exe`，251,158,932 字节，SHA-256 `2b5e884f1f5a739d296749e43b9cefb5d52bdcecca88471346dbbd943e12e909`。归档确认 app_version=2.4.2、知乎 profile 修复及必需运行时齐全，无登录态/用户设置；本地独立设置继续指向原 `dist/下载结果/`。
+- 正式 2.4.2 EXE 实际启动后窗口响应，发送正常关闭成功；单文件父进程清理超过首次 15 秒等待，后续只读复查确认两个本次进程均已退出，无强制终止。
+
+## 阶段 44：知乎 OpenCLI 多 profile（2026-10-18）
+- 初始 Git 工作区干净；已核对根目录 AGENTS、三份规划、知乎源码、窗口清理器与测试。
+- 复现 profile 枚举：本机两个已连接 profile，原命令未指定 profile；显式指定后的浏览器打开命令成功。
+- 检查发现 `dist/Fusion Downloader.exe` 正在运行，后续构建使用独立目录，保留现有程序与登录态、下载结果。
+- 已合并共用 OpenCLI runner，加入 profile 枚举、显式/默认优先与最多 4 个连接的顺序回退；打开、读取、释放固定同一 profile；保留窗口句柄清理边界。
+- 新增 10 项回归（全项目 185→195），涵盖选择优先级、断开项排除、上限、失败切换、超时清理、纯文本关闭、目标 ID 与 HTTP 403 回退。195 项单元测试、compileall、git diff --check 全部通过。
+- 从真实 Tkinter `_build_options(single=True)` 构造知乎、MD、按博主分类选项后运行统一调度，在 `build/zhihu-profile-wg1c3tz4/` 隔离验证：正文 3,647 字符，29 张图片全部本地化，0 图片下载失败、0 远程图片引用，29 张实际解码通过。校验脚本首次误把百分号编码的 URI 当作文件名；改用 `urllib.parse.unquote` 后验证通过，产品 Markdown 引用本身正确。
+- 最终源码再次实测同一专栏，正文与 29 张图片全部复用；将已验证的 30 个文件按 SHA-256 校验后交付到 `dist/下载结果/是一个爱好者/`，共 11,917,994 字节，无覆盖冲突。
+- 独立修复版：`dist/知乎修复版/Fusion Downloader.exe`，251,162,535 字节，SHA-256 `97f96d94d77011b1edc79f8c1dc8d35d3bc726290e072911c164a0fca1221ded`。新版目录的独立设置将 output_parent 指向原 `dist/`，保持 `dist/下载结果/` 和按作者分类。
+- PyInstaller 归档确认包含 `_extract_via_opencli_profile`、`opencli_profile_candidates`、`run_opencli_text` 与专栏目标校验，Deno/FFmpeg/FFprobe/字体齐全。实际启动后 GUI 响应，正常关闭且本次新进程无残留；最终 OpenCLI 空白浏览器窗口为 0。保留原版 EXE、登录态、既有设置和下载结果；未提交或推送。
+- 当前限制：真实站点验证覆盖本次专栏和可用 profile；其他账号/知乎未来风控仍可能拒绝请求，不承诺自动解除 403。多 profile 首个失败后的切换与清理由离线回归覆盖。
+- 清理尝试：仅针对本次 `build/zhihu-fixed/`、`build/zhihu-profile-wg1c3tz4/` 和 `build/zhihu-extract-check.js` 的删除被自动审批拒绝（`blocked by policy`），命令未执行；临时目录保留，不宣称已回收空间。
+
 ## 会话：2026-07-24（Bilibili 下载速度优化）
 
 ### 阶段 17：Bilibili 有界并行 Range 下载与速度验证

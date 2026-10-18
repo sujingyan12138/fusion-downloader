@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
-import sys
 import uuid
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -22,7 +19,13 @@ from downloaders.article_common import (
     save_web_article,
 )
 from downloaders.covers import CoverCandidate
-from downloaders.opencli_browser import OpenCliWindowGuard
+from downloaders.opencli_browser import (
+    OpenCliWindowGuard,
+    opencli_command,
+    opencli_profile_candidates,
+    run_opencli_json,
+    run_opencli_text,
+)
 
 
 URL_RE = re.compile(
@@ -116,7 +119,7 @@ def fetch_article(url: str, logger=None) -> WebArticle:
     if opencli_command():
         try:
             logger("普通请求受限，正在复用当前 Chrome 会话读取知乎正文...")
-            article = extract_via_opencli(canonical)
+            article = extract_via_opencli(canonical, log=logger)
             logger("知乎正文读取方式：当前 Chrome/OpenCLI 会话")
             return article
         except (ZhihuDownloadError, RuntimeError, subprocess.TimeoutExpired) as exc:
@@ -217,19 +220,34 @@ def meta_content(node, selector: str) -> str:
     return clean_text(element.get("content") if element else "")
 
 
-def extract_via_opencli(url: str) -> WebArticle:
+def extract_via_opencli(url: str, log=None) -> WebArticle:
+    logger = log or (lambda _message: None)
+    failures: list[str] = []
+    for profile in opencli_profile_candidates(cwd=douyin.app_base_dir()):
+        label = profile or "自动选择"
+        logger(f"尝试知乎 Chrome/OpenCLI profile：{label}")
+        try:
+            return _extract_via_opencli_profile(url, profile)
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"profile {label}：{exc}")
+            logger(f"知乎 profile {label} 未取得正文，检查下一条可用路径。")
+    raise ZhihuDownloadError("；".join(failures))
+
+
+def _extract_via_opencli_profile(url: str, profile: str | None) -> WebArticle:
     session = f"fusion-zhihu-{uuid.uuid4().hex[:10]}"
     window_guard = OpenCliWindowGuard()
     try:
-        result = run_opencli(
+        run_opencli(
             ["browser", session, "--window", "background", "open", url],
             timeout_seconds=60,
+            profile=profile,
         )
         window_guard.observe_owned_window()
-        current_url = str(result.get("url") or url)
         payload = run_opencli(
-            ["browser", session, "eval", build_extract_script(current_url)],
+            ["browser", session, "eval", build_extract_script(url)],
             timeout_seconds=110,
+            profile=profile,
         )
         window_guard.observe_owned_window()
         return article_from_payload(payload, url)
@@ -238,7 +256,12 @@ def extract_via_opencli(url: str) -> WebArticle:
     finally:
         window_guard.observe_owned_window()
         try:
-            run_opencli(["browser", session, "close"], timeout_seconds=15)
+            run_opencli(
+                ["browser", session, "close"],
+                timeout_seconds=15,
+                profile=profile,
+                json_output=False,
+            )
         except (RuntimeError, subprocess.TimeoutExpired):
             pass
         window_guard.close_released_window()
@@ -313,6 +336,8 @@ def article_from_payload(payload: object, source_url: str) -> WebArticle:
         content_id = article_id
     else:
         raise ZhihuDownloadError("浏览器正文缺少回答或文章 ID。")
+    if canonical != canonicalize_url(source_url):
+        raise ZhihuDownloadError("浏览器返回的正文 ID 与目标链接不符。")
     title = clean_text(payload.get("title"))
     if not title:
         raise ZhihuDownloadError("浏览器已提取正文，但标题为空。")
@@ -390,6 +415,9 @@ def build_extract_script(url: str) -> str:
       '.Post-RichTextContainer .RichText, article .Post-RichText, .Post-RichText'
     );
     if (body) {{
+      if (location.pathname.replace(/\\/$/, '') !== '/p/' + articleId) {{
+        return {{error: 'target_mismatch', pageText: '当前页面不是目标专栏文章'}};
+      }}
       return {{
         title: (document.querySelector('h1.Post-Title')?.textContent || '').trim(),
         author: (document.querySelector('.AuthorInfo-name')?.textContent || '').trim(),
@@ -406,59 +434,20 @@ def build_extract_script(url: str) -> str:
 """.strip()
 
 
-def parse_first_json(value: str):
-    stripped = value.lstrip()
-    try:
-        result, _ = json.JSONDecoder().raw_decode(stripped)
-        return result
-    except json.JSONDecodeError as exc:
-        preview = re.sub(r"\s+", " ", value).strip()[:300]
-        raise RuntimeError(f"无法解析 OpenCLI 返回值：{preview}") from exc
-
-
-def opencli_command() -> list[str] | None:
-    launcher = shutil.which("opencli.cmd") or shutil.which("opencli")
-    if not launcher:
-        return None
-    launcher_path = Path(launcher)
-    if launcher_path.suffix.lower() in {".cmd", ".ps1"}:
-        node = launcher_path.parent / "node.exe"
-        main = (
-            launcher_path.parent
-            / "node_modules"
-            / "@jackwener"
-            / "opencli"
-            / "dist"
-            / "src"
-            / "main.js"
-        )
-        if node.is_file() and main.is_file():
-            return [str(node), str(main)]
-    return [launcher]
-
-
-def run_opencli(args: list[str], timeout_seconds: int = 60):
-    command = opencli_command()
-    if not command:
-        raise RuntimeError("未找到 OpenCLI。")
-    kwargs = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    completed = subprocess.run(
-        [*command, *args],
+def run_opencli(
+    args: list[str],
+    timeout_seconds: int = 60,
+    *,
+    profile: str | None = None,
+    json_output: bool = True,
+):
+    scoped_args = ["--profile", profile, *args] if profile else args
+    runner = run_opencli_json if json_output else run_opencli_text
+    return runner(
+        scoped_args,
         cwd=douyin.app_base_dir(),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout_seconds,
-        check=False,
-        **kwargs,
+        timeout_seconds=timeout_seconds,
     )
-    if completed.returncode != 0:
-        detail = clean_text(completed.stderr or completed.stdout)
-        raise RuntimeError(f"OpenCLI 执行失败：{detail or f'退出码 {completed.returncode}'}")
-    return parse_first_json(completed.stdout)
 
 
 def zhihu_image_candidates(image: Tag, source_url: str) -> list[CoverCandidate]:
